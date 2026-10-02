@@ -44,8 +44,17 @@ memory_dir() {
 }
 
 publish_verdict() {
+  local dest dir tmp
   [[ -n "${AAOS_AI_GATE_VERDICT_FILE:-}" ]] || return 0
-  printf '%s\n' "$1" > "$AAOS_AI_GATE_VERDICT_FILE"
+  dest=$AAOS_AI_GATE_VERDICT_FILE
+  dir=$(dirname "$dest")
+  [[ -d "$dir" ]] || return 0
+  tmp=$(mktemp "$dir/.verdict.XXXXXX") || return 0
+  if ! printf '%s\n' "$1" > "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$dest"
 }
 
 append_note() {
