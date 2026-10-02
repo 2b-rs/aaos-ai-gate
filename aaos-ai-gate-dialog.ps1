@@ -214,21 +214,32 @@ $timer.Add_Tick({
   if (-not $script:chatJob) { return }
   $state = [string]$script:chatJob.State
   if ($state -eq 'Running' -or $state -eq 'NotStarted') { return }
-  $out = Receive-Job $script:chatJob -ErrorAction SilentlyContinue -ErrorVariable jobErr
+  $failed = ($state -eq 'Failed')
+  $out = Receive-Job $script:chatJob -ErrorAction SilentlyContinue
   Remove-Job $script:chatJob -Force -ErrorAction SilentlyContinue
   $script:chatJob = $null
   $script:BtnAsk.Enabled = ($script:askVia -ne 'off')
-  if ($jobErr -and $jobErr.Count -gt 0) {
-    $script:LblStatus.Text = 'Die Anfrage ist fehlgeschlagen. Der Build läuft weiter.'
-    return
-  }
+  if (-not $failed -and $state -ne 'Completed') { return }
   $reply = ''
   if ($script:askVia -eq 'url') {
+    if ($failed) {
+      $script:LblStatus.Text = 'Die Anfrage ist fehlgeschlagen. Der Build läuft weiter.'
+      return
+    }
     try { $reply = [string]$out.choices[0].message.content } catch { $reply = '' }
-  } elseif ($out -is [System.Array]) {
-    $reply = (($out | ForEach-Object { [string]$_ }) -join "`n").Trim()
   } else {
-    $reply = ([string]$out).Trim()
+    $answerPath = Join-Path $DataDir 'answer.txt'
+    if (Test-Path -LiteralPath $answerPath) {
+      try {
+        $reply = [System.IO.File]::ReadAllText($answerPath, [System.Text.Encoding]::UTF8)
+      } catch {
+        $reply = ''
+      }
+      if ($reply) { $reply = $reply.Trim() }
+    }
+    if ($failed -and -not $reply) {
+      $reply = 'Die Rueckfrage ist fehlgeschlagen.'
+    }
   }
   if (-not $reply) { $reply = 'Keine Antwort.' }
   if ($script:pendingQuestion) {
@@ -260,25 +271,33 @@ $btnAsk.Add_Click({
     }
     [System.IO.File]::WriteAllText((Join-Path $DataDir 'question.txt'), $text, $utf8)
     [System.IO.File]::WriteAllText((Join-Path $DataDir 'history.txt'), $hist, $utf8)
+    Remove-Item -LiteralPath (Join-Path $DataDir 'answer.txt') -Force -ErrorAction SilentlyContinue
+    $linuxData = [string]$meta.linuxData
+    $askCmd = @(
+      (Quote-Bash ([string]$meta.linuxScript))
+      'ask'
+      '--conf'
+      (Quote-Bash ([string]$meta.linuxConf))
+      '--context'
+      (Quote-Bash ($linuxData + '/context.txt'))
+      '--question'
+      (Quote-Bash ($linuxData + '/question.txt'))
+      '--history'
+      (Quote-Bash ($linuxData + '/history.txt'))
+      '--answer'
+      (Quote-Bash ($linuxData + '/answer.txt'))
+    ) -join ' '
+    $distro = [string]$meta.distro
     $script:chatJob = Start-Job -ScriptBlock {
-      param($dir)
-      $metaFile = Get-Content -LiteralPath (Join-Path $dir 'meta.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-      $bash = [string]$metaFile.linuxScript
-      $data = [string]$metaFile.linuxData
-      $argList = @(
-        'ask',
-        '--conf', [string]$metaFile.linuxConf,
-        '--context', ($data + '/context.txt'),
-        '--question', ($data + '/question.txt'),
-        '--history', ($data + '/history.txt')
-      )
-      if ([string]$metaFile.distro) {
-        & wsl.exe -d ([string]$metaFile.distro) -e bash $bash @argList
+      param($distro, $cmd)
+      $ErrorActionPreference = 'Continue'
+      if ($distro) {
+        & wsl.exe -d $distro -e bash -c $cmd 2>$null
       } else {
-        & wsl.exe -e bash $bash @argList
+        & wsl.exe -e bash -c $cmd 2>$null
       }
       if ($LASTEXITCODE -ne 0) { throw 'Die Rueckfrage ist fehlgeschlagen.' }
-    } -ArgumentList $DataDir
+    } -ArgumentList $distro, $askCmd
   } else {
     $modelName = [string]$meta.model
     if (-not $modelName) { $modelName = 'default' }
