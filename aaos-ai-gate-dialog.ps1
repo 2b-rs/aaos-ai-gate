@@ -252,6 +252,13 @@ $timer.Add_Tick({
     }
   }
   if (-not $reply) { $reply = 'Keine Antwort.' }
+  if ($failed) {
+    # Fehlertext nur anzeigen, nicht in den Verlauf der naechsten Frage uebernehmen.
+    $script:pendingQuestion = ''
+    $script:TxtChat.AppendText("Fehler: $reply`r`n`r`n")
+    $script:LblStatus.Text = 'Die Rueckfrage ist fehlgeschlagen. Der Build laeuft weiter.'
+    return
+  }
   if ($script:pendingQuestion) {
     $script:follow.Add("Sie: $($script:pendingQuestion)") | Out-Null
     $script:follow.Add("KI: $reply") | Out-Null
