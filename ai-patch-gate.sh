@@ -751,6 +751,10 @@ cli_claude() {
       --model "$model"
   ) < "$prompt_file" > "$out_file"
   rc=$?
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von claude"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von claude ist fehlgeschlagen"
     return 1
@@ -777,6 +781,10 @@ cli_agy() {
   ) < "$wrapped" > "$out_file"
   rc=$?
   rm -f "$wrapped"
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von agy"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von agy ist fehlgeschlagen"
     return 1
@@ -809,6 +817,10 @@ cli_copilot() {
   ) < "$wrapped" > "$out_file"
   rc=$?
   rm -f "$wrapped"
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von copilot"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von copilot ist fehlgeschlagen"
     return 1
