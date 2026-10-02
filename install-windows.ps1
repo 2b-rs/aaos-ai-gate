@@ -16,7 +16,7 @@ if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
     exit $LASTEXITCODE
   }
   $quotedFile = '"' + ($PSCommandPath -replace '"', '""') + '"'
-  $arg = "-NoProfile -STA -File $quotedFile"
+  $arg = "-NoProfile -STA -ExecutionPolicy Bypass -File $quotedFile"
   foreach ($a in $args) {
     $arg += ' "' + (([string]$a) -replace '"', '""') + '"'
   }
@@ -91,6 +91,7 @@ if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GA
 fi
 
 '@
+  $block = $block.Replace("`r`n", "`n")
   $wrapGate = '_wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run --'
   if ($Text.Contains($wrapGate) -and $Text.Contains('export TOP')) {
     return @{ Text = $Text; Status = 'vorhanden' }
@@ -229,6 +230,9 @@ function Uninstall-GatePath([string]$Tree) {
     }
     $text = $text.Remove($span.Start, $span.End - $span.Start)
     [System.IO.File]::WriteAllText($mPath, $text, $utf8)
+  }
+  if ($text.Contains('ai-patch-gate.sh')) {
+    throw 'Hook in m ist noch vorhanden. Skripte und Konfiguration bleiben.'
   }
   $ccacheWarn = ''
   $confBefore = Join-Path $Tree '.aaos-ai-gate.conf'
@@ -647,6 +651,9 @@ function Install-Gate {
   $patched = Update-BuildEntry $mText
   if ($patched.Status -eq 'fehlt') {
     $notes.Add((Get-ManualHook))
+  } elseif ($patched.Status -eq 'vorhanden, ohne export TOP' -or $patched.Status -eq 'vorhanden, Hook unvollstaendig') {
+    $notes.Add("Hook in m: $($patched.Status).")
+    $notes.Add('Hinweis: der vorhandene Block wurde nicht geaendert. Den Hook in build/soong/bin/m von Hand pruefen.')
   } elseif ($patched.Text -ne $mText) {
     [System.IO.File]::WriteAllText($mPath, $patched.Text, $utf8)
   }
