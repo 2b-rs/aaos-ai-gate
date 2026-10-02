@@ -1226,10 +1226,17 @@ COLLECT
     finish_pre "$fast_state" "$list" 0
   fi
   if [[ -d "$workspace/.repo" ]] && command -v repo >/dev/null 2>&1; then
+    repo_rc=0
     (
-      cd "$workspace"
+      cd "$workspace" || exit 1
       repo forall -c "bash \"$collector\""
-    ) || echo "ai-patch-gate: repo forall failed, looking at this git checkout only" >&2
+    ) || repo_rc=$?
+    if [[ "$repo_rc" -ne 0 ]]; then
+      : > "$list"
+      : > "$rev_file"
+      echo "ai-patch-gate: repo forall ist fehlgeschlagen, dieser m läuft ohne Prüfung" >&2
+      finish_pre "" "$list" 0
+    fi
   fi
   if [[ ! -s "$rev_file" ]]; then
     git_top=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")
