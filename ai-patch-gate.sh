@@ -213,12 +213,22 @@ replay_notes() {
   fi
 }
 
+conf_comment_ahead() {
+  local tail=$1
+  [[ "$tail" =~ ^[[:space:]]*# ]]
+}
+
 unquote_conf() {
-  local s=$1 i=0 n ch out= state=0
-  if [[ "$s" != \'* ]]; then
-    if [[ "$s" == \"*\" ]]; then
-      s=${s#\"}
-      s=${s%\"}
+  local s=$1 i=0 n ch out= state=0 tail
+  s=${s#"${s%%[![:space:]]*}"}
+  if [[ -z "$s" ]]; then
+    printf ''
+    return 0
+  fi
+  if [[ "$s" != \'* && "$s" != \"* ]]; then
+    if [[ "$s" == *" #"* ]]; then
+      s=${s%% #*}
+      s=${s%"${s##*[![:space:]]}"}
     fi
     printf '%s' "$s"
     return 0
@@ -226,9 +236,40 @@ unquote_conf() {
   n=${#s}
   local sq=\' dq=\" embed
   embed="${dq}${sq}${dq}"
+  if [[ "$s" == \"* ]]; then
+    i=1
+    state=1
+  fi
   while (( i < n )); do
     ch=${s:i:1}
+    if [[ "$s" == \"* ]]; then
+      if (( state == 1 )); then
+        if [[ "$ch" == '\' ]]; then
+          i=$((i + 1))
+          if (( i < n )); then
+            ch=${s:i:1}
+            out+=$ch
+          fi
+        elif [[ "$ch" == '"' ]]; then
+          state=0
+        else
+          out+=$ch
+        fi
+      else
+        tail=${s:i}
+        if conf_comment_ahead "$tail"; then
+          break
+        fi
+        out+=$ch
+      fi
+      i=$((i + 1))
+      continue
+    fi
     if (( state == 0 )); then
+      tail=${s:i}
+      if conf_comment_ahead "$tail"; then
+        break
+      fi
       if [[ "$ch" == "'" ]]; then
         state=1
       elif [[ "${s:i:3}" == "$embed" ]]; then
@@ -237,8 +278,10 @@ unquote_conf() {
         continue
       elif [[ "$ch" == '\' ]]; then
         i=$((i + 1))
-        ch=${s:i:1}
-        out+=$ch
+        if (( i < n )); then
+          ch=${s:i:1}
+          out+=$ch
+        fi
       else
         out+=$ch
       fi
@@ -253,18 +296,41 @@ unquote_conf() {
 }
 
 load_tree_conf() {
-  local conf line key val ccache_warn
-  conf=${TOP:-$PWD}/.aaos-ai-gate.conf
+  local conf line key val ccache_warn lineno
+  if [[ $# -ge 1 && -n "${1:-}" ]]; then
+    conf=$1
+  else
+    conf=${TOP:-$PWD}/.aaos-ai-gate.conf
+  fi
   [[ -f "$conf" ]] || return 0
   ccache_warn=0
+  lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
     line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
     case "$line" in
       ''|\#*) continue ;;
     esac
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line=${line#export}
+      line=${line#"${line%%[![:space:]]*}"}
+    fi
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    if [[ "$line" != *=* ]]; then
+      echo "ai-patch-gate: Konfiguration Zeile $lineno wird ignoriert" >&2
+      continue
+    fi
     key=${line%%=*}
-    val=$(unquote_conf "${line#*=}")
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    key=${key%"${key##*[![:space:]]}"}
+    val=${line#*=}
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "ai-patch-gate: Konfiguration Zeile $lineno wird ignoriert" >&2
+      continue
+    fi
+    val=$(unquote_conf "$val")
     case "$key" in
       AAOS_AI_GATE|AAOS_AI_GATE_*) ;;
       USE_CCACHE|CCACHE_EXEC|CCACHE_DIR|CCACHE_MAXSIZE)
