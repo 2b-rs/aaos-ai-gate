@@ -1,4 +1,9 @@
-﻿# Dialog fuer den parallelen Modus. Der Build laeuft weiter.
+﻿# Rueckfrage: wsl.exe [-d distro] -e bash -c, kein -l und kein -i.
+# Befehl: '<script>' ask --conf '<env.conf>' --context --question --history --answer.
+# Jeder Pfad steht einzeln in einfachen Quotes. env.conf liegt im Datenverzeichnis.
+# Nur $LASTEXITCODE entscheidet. stderr und NativeCommandError sind kein Fehler.
+# Antwort und Fehlermeldung stehen als UTF-8 in answer.txt, nicht in der Job-Ausgabe.
+# Dialog fuer den parallelen Modus. Der Build laeuft weiter.
 param(
   [Parameter(Mandatory = $true)][string]$DataDir
 )
@@ -7,13 +12,24 @@ $ErrorActionPreference = 'Stop'
 
 if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
   $hostExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  Start-Process -FilePath $hostExe -ArgumentList @(
-    '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-    '-File', $PSCommandPath, '-DataDir', $DataDir
-  ) | Out-Null
+  # PowerShell 5.1 quotet ArgumentList nicht. Die Anfuehrungszeichen gehoeren ins Element.
+  $qScript = '"' + ($PSCommandPath -replace '"', '`"') + '"'
+  $qData = '"' + ($DataDir -replace '"', '`"') + '"'
+  try {
+    Start-Process -FilePath $hostExe -ArgumentList @(
+      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+      '-File', $qScript, '-DataDir', $qData
+    ) | Out-Null
+  } catch {
+    Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
   exit 0
 }
 
+$form = $null
+$timer = $null
+try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -64,6 +80,9 @@ function Add-GitExclude([string]$Top, [string]$Name) {
 }
 
 $metaPath = Join-Path $DataDir 'meta.json'
+if (-not (Test-Path -LiteralPath $metaPath)) {
+  throw 'meta.json fehlt.'
+}
 $meta = Get-Content -LiteralPath $metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $problem = Read-Utf8 (Join-Path $DataDir 'problem.txt')
 if (-not $problem) { $problem = 'Das Modell hat einen Hinweis zum aktuellen Diff. Der Build läuft weiter.' }
@@ -174,7 +193,7 @@ $chk.Text = 'Nicht mehr anzeigen'
 $chk.Location = New-Object System.Drawing.Point(16, 428)
 $chk.AutoSize = $true
 $form.Controls.Add($chk)
-$tip.SetToolTip($chk, 'Gilt beim Schließen. Legt .aaos-ai-gate.dialog-off in die Wurzel des Quellbaums und setzt AAOS_AI_GATE_DIALOG=off in der Konfiguration. Beides entfernen, dann erscheint der Dialog beim nächsten Verdacht wieder.')
+$tip.SetToolTip($chk, 'Gilt beim Schließen. Legt .aaos-ai-gate.dialog-off in die Wurzel des Quellbaums. AAOS_AI_GATE_DIALOG=off wird nur geschrieben, wenn eine Konfiguration im Baum existiert. Marker und, falls gesetzt, die Zeile entfernen, dann erscheint der Dialog beim nächsten Verdacht wieder.')
 
 $btnMode = New-Object System.Windows.Forms.Button
 $btnMode.Text = 'Auf blockierend umstellen'
@@ -205,23 +224,41 @@ $timer.Add_Tick({
   if (-not $script:chatJob) { return }
   $state = [string]$script:chatJob.State
   if ($state -eq 'Running' -or $state -eq 'NotStarted') { return }
-  $out = Receive-Job $script:chatJob -ErrorAction SilentlyContinue -ErrorVariable jobErr
+  $failed = ($state -eq 'Failed')
+  $out = Receive-Job $script:chatJob -ErrorAction SilentlyContinue
   Remove-Job $script:chatJob -Force -ErrorAction SilentlyContinue
   $script:chatJob = $null
   $script:BtnAsk.Enabled = ($script:askVia -ne 'off')
-  if ($jobErr -and $jobErr.Count -gt 0) {
-    $script:LblStatus.Text = 'Die Anfrage ist fehlgeschlagen. Der Build läuft weiter.'
-    return
-  }
+  if (-not $failed -and $state -ne 'Completed') { return }
   $reply = ''
   if ($script:askVia -eq 'url') {
+    if ($failed) {
+      $script:LblStatus.Text = 'Die Anfrage ist fehlgeschlagen. Der Build läuft weiter.'
+      return
+    }
     try { $reply = [string]$out.choices[0].message.content } catch { $reply = '' }
-  } elseif ($out -is [System.Array]) {
-    $reply = (($out | ForEach-Object { [string]$_ }) -join "`n").Trim()
   } else {
-    $reply = ([string]$out).Trim()
+    $answerPath = Join-Path $DataDir 'answer.txt'
+    if (Test-Path -LiteralPath $answerPath) {
+      try {
+        $reply = [System.IO.File]::ReadAllText($answerPath, [System.Text.Encoding]::UTF8)
+      } catch {
+        $reply = ''
+      }
+      if ($reply) { $reply = $reply.Trim() }
+    }
+    if ($failed -and -not $reply) {
+      $reply = 'Die Rueckfrage ist fehlgeschlagen.'
+    }
   }
   if (-not $reply) { $reply = 'Keine Antwort.' }
+  if ($failed) {
+    # Fehlertext nur anzeigen, nicht in den Verlauf der naechsten Frage uebernehmen.
+    $script:pendingQuestion = ''
+    $script:TxtChat.AppendText("Fehler: $reply`r`n`r`n")
+    $script:LblStatus.Text = 'Die Rueckfrage ist fehlgeschlagen. Der Build laeuft weiter.'
+    return
+  }
   if ($script:pendingQuestion) {
     $script:follow.Add("Sie: $($script:pendingQuestion)") | Out-Null
     $script:follow.Add("KI: $reply") | Out-Null
@@ -251,25 +288,33 @@ $btnAsk.Add_Click({
     }
     [System.IO.File]::WriteAllText((Join-Path $DataDir 'question.txt'), $text, $utf8)
     [System.IO.File]::WriteAllText((Join-Path $DataDir 'history.txt'), $hist, $utf8)
+    Remove-Item -LiteralPath (Join-Path $DataDir 'answer.txt') -Force -ErrorAction SilentlyContinue
+    $linuxData = [string]$meta.linuxData
+    $askCmd = @(
+      (Quote-Bash ([string]$meta.linuxScript))
+      'ask'
+      '--conf'
+      (Quote-Bash ([string]$meta.linuxConf))
+      '--context'
+      (Quote-Bash ($linuxData + '/context.txt'))
+      '--question'
+      (Quote-Bash ($linuxData + '/question.txt'))
+      '--history'
+      (Quote-Bash ($linuxData + '/history.txt'))
+      '--answer'
+      (Quote-Bash ($linuxData + '/answer.txt'))
+    ) -join ' '
+    $distro = [string]$meta.distro
     $script:chatJob = Start-Job -ScriptBlock {
-      param($dir)
-      $metaFile = Get-Content -LiteralPath (Join-Path $dir 'meta.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-      $bash = [string]$metaFile.linuxScript
-      $data = [string]$metaFile.linuxData
-      $argList = @(
-        'ask',
-        '--conf', [string]$metaFile.linuxConf,
-        '--context', ($data + '/context.txt'),
-        '--question', ($data + '/question.txt'),
-        '--history', ($data + '/history.txt')
-      )
-      if ([string]$metaFile.distro) {
-        & wsl.exe -d ([string]$metaFile.distro) -e bash $bash @argList
+      param($distro, $cmd)
+      $ErrorActionPreference = 'Continue'
+      if ($distro) {
+        & wsl.exe -d $distro -e bash -c $cmd 2>$null
       } else {
-        & wsl.exe -e bash $bash @argList
+        & wsl.exe -e bash -c $cmd 2>$null
       }
       if ($LASTEXITCODE -ne 0) { throw 'Die Rueckfrage ist fehlgeschlagen.' }
-    } -ArgumentList $DataDir
+    } -ArgumentList $distro, $askCmd
   } else {
     $modelName = [string]$meta.model
     if (-not $modelName) { $modelName = 'default' }
@@ -321,7 +366,7 @@ $form.Add_FormClosed({
     try {
       $utf8 = New-Object System.Text.UTF8Encoding $false
       [System.IO.File]::WriteAllText([string]$meta.marker, "off`n", $utf8)
-      if ($meta.conf -and (Test-Path -LiteralPath ([string]$meta.conf))) {
+      if ($meta.conf -and (Test-Path -LiteralPath ([string]$meta.conf) -PathType Leaf)) {
         Set-ConfLine ([string]$meta.conf) 'AAOS_AI_GATE_DIALOG' 'off'
       }
       Add-GitExclude ([string]$meta.top) '.aaos-ai-gate.dialog-off'
@@ -332,4 +377,14 @@ $form.Add_FormClosed({
 })
 
 [void]$form.ShowDialog()
-$timer.Dispose()
+} finally {
+  if ($null -ne $form) {
+    try { $form.Dispose() } catch { }
+    $form = $null
+  }
+  if ($null -ne $timer) {
+    try { $timer.Dispose() } catch { }
+    $timer = $null
+  }
+  Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+}
