@@ -17,6 +17,9 @@ if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
   exit 0
 }
 
+$form = $null
+$timer = $null
+try {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -67,6 +70,9 @@ function Add-GitExclude([string]$Top, [string]$Name) {
 }
 
 $metaPath = Join-Path $DataDir 'meta.json'
+if (-not (Test-Path -LiteralPath $metaPath)) {
+  throw 'meta.json fehlt.'
+}
 $meta = Get-Content -LiteralPath $metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $problem = Read-Utf8 (Join-Path $DataDir 'problem.txt')
 if (-not $problem) { $problem = 'Das Modell hat einen Hinweis zum aktuellen Diff. Der Build läuft weiter.' }
@@ -335,4 +341,14 @@ $form.Add_FormClosed({
 })
 
 [void]$form.ShowDialog()
-$timer.Dispose()
+} finally {
+  if ($null -ne $form) {
+    try { $form.Dispose() } catch { }
+    $form = $null
+  }
+  if ($null -ne $timer) {
+    try { $timer.Dispose() } catch { }
+    $timer = $null
+  }
+  Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+}
