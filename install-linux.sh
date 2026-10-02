@@ -536,7 +536,7 @@ fi
 
 skip_m=no
 case "$hook_status" in
-  eingefuegt|aktualisiert|vorhanden*) skip_m=yes ;;
+  eingefuegt|aktualisiert|vorhanden) skip_m=yes ;;
 esac
 hide_gate_from_git "$tree" "$skip_m"
 
