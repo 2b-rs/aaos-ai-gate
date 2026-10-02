@@ -580,7 +580,7 @@ if [[ "$self_env" == yes ]]; then
   if [[ "$provider_detected" == yes ]]; then
     printf '%s\n' "Anbieter erkannt: $(provider_label "$provider")."
   fi
-  python3 - "$mode" "$provider" "$auth" "$AAOS_INSTALL_URL" "$AAOS_INSTALL_MODEL" \
+  AAOS_INSTALL_TOKEN="$AAOS_INSTALL_TOKEN" python3 - "$mode" "$provider" "$auth" "$AAOS_INSTALL_URL" "$AAOS_INSTALL_MODEL" \
     "$do_ccache" "$AAOS_INSTALL_CCACHE_EXEC" "$AAOS_INSTALL_CCACHE_DIR" "$AAOS_INSTALL_CCACHE_SIZE" << 'PY'
 import os, shlex, sys
 mode, provider, auth, url, model, do, exe, cdir, size = sys.argv[1:10]

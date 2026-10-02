@@ -261,6 +261,39 @@ else
   fail "g hits=$hits argvlog_empty=$([[ -s $argvlog ]] && echo no || echo yes)"
 fi
 
+# --- (h) Self-Env Token als nicht exportierte Shell-Variable ---
+# Die Briefing-Form `AAOS_INSTALL_TOKEN=geheim exec bash install-linux.sh` legt
+# den Wert in die Umgebung des exec. BASH_ENV setzt ihn nur in der Shell.
+tree_h=$(make_tree)
+stage_h=$(stage_installer)
+settok=$(mktemp "${TMPDIR:-/tmp}/aaos-gate-tok.XXXXXX")
+note_cleanup "$settok"
+printf '%s\n' 'AAOS_INSTALL_TOKEN=geheim' > "$settok"
+tok_env=$(env -u AAOS_INSTALL_TOKEN BASH_ENV="$settok" bash -c 'python3 -c "import os; print(os.environ.get(\"AAOS_INSTALL_TOKEN\") or \"\")"')
+tok_sh=$(env -u AAOS_INSTALL_TOKEN BASH_ENV="$settok" bash -c 'printf %s "$AAOS_INSTALL_TOKEN"')
+if [[ -n "$tok_env" || "$tok_sh" != "geheim" ]]; then
+  fail "h Vorbereitung: Token exportiert oder nicht gesetzt (env='$tok_env' sh='$tok_sh')"
+else
+  out_h=$(
+    env -u AAOS_INSTALL_TOKEN \
+      BASH_ENV="$settok" \
+      AAOS_INSTALL_TREE="$tree_h" \
+      AAOS_INSTALL_MODE=blocking \
+      AAOS_INSTALL_PROVIDER=claude \
+      AAOS_INSTALL_AUTH=token \
+      AAOS_INSTALL_ADVANCED=nein \
+      AAOS_INSTALL_SELF_ENV=ja \
+      AAOS_INSTALL_CCACHE=nein \
+      AAOS_INSTALL_CCACHE_INSTALL=nein \
+      bash "$stage_h/install-linux.sh" 2>&1
+  ) || true
+  if printf '%s\n' "$out_h" | grep -Eq "export AAOS_AI_GATE_TOKEN=('geheim'|geheim)$"; then
+    pass "h Self-Env Token nicht exportiert, Ausgabe enthaelt export"
+  else
+    fail "h Token-Zeile fehlt: $(printf '%s' "$out_h" | grep AAOS_AI_GATE_TOKEN | tr '\n' '|')"
+  fi
+fi
+
 printf '%s\n' "$n Tests, $bad fehlgeschlagen"
 if [[ "$bad" -ne 0 ]]; then
   exit 1
