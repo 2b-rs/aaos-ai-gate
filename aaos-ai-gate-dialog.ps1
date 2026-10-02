@@ -183,7 +183,7 @@ $chk.Text = 'Nicht mehr anzeigen'
 $chk.Location = New-Object System.Drawing.Point(16, 428)
 $chk.AutoSize = $true
 $form.Controls.Add($chk)
-$tip.SetToolTip($chk, 'Gilt beim Schließen. Legt .aaos-ai-gate.dialog-off in die Wurzel des Quellbaums und setzt AAOS_AI_GATE_DIALOG=off in der Konfiguration. Beides entfernen, dann erscheint der Dialog beim nächsten Verdacht wieder.')
+$tip.SetToolTip($chk, 'Gilt beim Schließen. Legt .aaos-ai-gate.dialog-off in die Wurzel des Quellbaums. AAOS_AI_GATE_DIALOG=off wird nur geschrieben, wenn eine Konfiguration im Baum existiert. Marker und, falls gesetzt, die Zeile entfernen, dann erscheint der Dialog beim nächsten Verdacht wieder.')
 
 $btnMode = New-Object System.Windows.Forms.Button
 $btnMode.Text = 'Auf blockierend umstellen'
@@ -349,7 +349,7 @@ $form.Add_FormClosed({
     try {
       $utf8 = New-Object System.Text.UTF8Encoding $false
       [System.IO.File]::WriteAllText([string]$meta.marker, "off`n", $utf8)
-      if ($meta.conf -and (Test-Path -LiteralPath ([string]$meta.conf))) {
+      if ($meta.conf -and (Test-Path -LiteralPath ([string]$meta.conf) -PathType Leaf)) {
         Set-ConfLine ([string]$meta.conf) 'AAOS_AI_GATE_DIALOG' 'off'
       }
       Add-GitExclude ([string]$meta.top) '.aaos-ai-gate.dialog-off'
