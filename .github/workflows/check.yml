@@ -1,0 +1,43 @@
+# Prueft die Lieferung ohne eigenen Windows-Rechner: Linux-Tests auf Ubuntu,
+# PowerShell-Logik auf einem Windows-Runner mit Windows PowerShell 5.1 und PowerShell 7.
+name: check
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pakete
+        run: sudo apt-get install -y jq shellcheck
+      - name: Syntax und shellcheck
+        run: |
+          bash -n ai-patch-gate.sh install-linux.sh
+          shellcheck -S warning -e SC1007,SC2088,SC2163 ai-patch-gate.sh install-linux.sh
+      - name: Installer-Tests
+        run: bash tests/test_install_linux.sh
+      - name: Gate-Tests
+        run: TMPDIR=$(mktemp -d) bash tests/test_gate.sh
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Logik mit Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/test_windows_logic.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Logik mit PowerShell 7
+        shell: pwsh
+        run: pwsh -NoProfile -File tests/test_windows_logic.ps1
+      - name: Installer headless ohne WSL (erwarteter Abbruch mit Meldung)
+        shell: powershell
+        run: |
+          $env:AAOS_INSTALL_TREE = "$env:RUNNER_TEMP\kein-baum"
+          New-Item -ItemType Directory -Path $env:AAOS_INSTALL_TREE -Force | Out-Null
+          powershell -NoProfile -STA -ExecutionPolicy Bypass -File install-windows.ps1 -Uninstall
+          "Exit $LASTEXITCODE (ein Fehler ist hier erwartet, weil der Baum leer ist)"
+          exit 0
