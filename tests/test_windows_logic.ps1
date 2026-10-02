@@ -36,7 +36,11 @@ $bash = Get-Command bash -ErrorAction SilentlyContinue
 foreach ($v in @("it's a token", 'back\slash', '$HOME/x', 'a"b', 'plain')) {
   $q = Quote-Bash $v
   if ($bash) {
-    $out = & $bash.Source -c ("printf '%s' " + $q)
+    # Ueber eine Skriptdatei, damit die Windows-Kommandozeile das Quoting nicht veraendert.
+    $probe = Join-Path ([System.IO.Path]::GetTempPath()) ("aaos-quote-" + [guid]::NewGuid().ToString('N') + '.sh')
+    [System.IO.File]::WriteAllText($probe, "printf '%s' " + $q + "`n", (New-Object System.Text.UTF8Encoding $false))
+    $out = & $bash.Source $probe
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
     Check "Quote-Bash roundtrip [$v]" ($out -ceq $v) "got [$out]"
   } else {
     Check "Quote-Bash single-quoted [$v]" ($q.StartsWith("'") -and $q.EndsWith("'"))
