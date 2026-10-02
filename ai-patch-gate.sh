@@ -12,10 +12,59 @@
 # Yes is remembered. No only stops this run. j starts the build anyway.
 # parallel never aborts by itself. Ctrl-C and the IDE stop button do.
 # A faster build cancels the in-flight request; the next m checks again.
-# AAOS_AI_GATE=stop is the only hard refuse, and only for likely_fail.
+# AAOS_AI_GATE=stop is the only hard refuse, and only for likely_fail,
+# and only in blocking mode. parallel, suggest and suggest-only never stop.
 # ccache is not loaded from the conf. That file is read only by m.
 # mm, mmm, mma, mmma and make would otherwise see a different CC_WRAPPER.
 set -u
+
+GATE_TMP_ROOT=
+ASK_ANSWER=
+
+cleanup_gate_tmp() {
+  # Command substitutions and pipelines inherit EXIT. Only the main shell
+  # owns the directory; a subshell must not delete it on the way out.
+  [[ "${BASH_SUBSHELL:-0}" -eq 0 ]] || return 0
+  if [[ -n "${GATE_TMP_ROOT:-}" && -d "$GATE_TMP_ROOT" ]]; then
+    rm -rf "$GATE_TMP_ROOT"
+    GATE_TMP_ROOT=
+  fi
+}
+
+ensure_gate_tmp() {
+  if [[ -n "${GATE_TMP_ROOT:-}" && -d "$GATE_TMP_ROOT" ]]; then
+    return 0
+  fi
+  if [[ -n "${AAOS_GATE_TMP:-}" && -d "$AAOS_GATE_TMP" ]]; then
+    GATE_TMP_ROOT=$AAOS_GATE_TMP
+    return 0
+  fi
+  GATE_TMP_ROOT=$(mktemp -d)
+  chmod 700 "$GATE_TMP_ROOT" || true
+}
+
+gate_mktemp() {
+  ensure_gate_tmp
+  mktemp "$GATE_TMP_ROOT/f.XXXXXX"
+}
+
+byte_len() {
+  local s=$1 n had=0 saved=
+  if [[ -n "${LC_ALL+x}" ]]; then
+    had=1
+    saved=$LC_ALL
+  fi
+  LC_ALL=C
+  n=${#s}
+  if [[ "$had" -eq 1 ]]; then
+    LC_ALL=$saved
+  else
+    unset LC_ALL
+  fi
+  printf '%s' "$n"
+}
+
+trap 'cleanup_gate_tmp' EXIT
 
 hash_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -44,8 +93,17 @@ memory_dir() {
 }
 
 publish_verdict() {
+  local dest dir tmp
   [[ -n "${AAOS_AI_GATE_VERDICT_FILE:-}" ]] || return 0
-  printf '%s\n' "$1" > "$AAOS_AI_GATE_VERDICT_FILE"
+  dest=$AAOS_AI_GATE_VERDICT_FILE
+  dir=$(dirname "$dest")
+  [[ -d "$dir" ]] || return 0
+  tmp=$(mktemp "$dir/.verdict.XXXXXX") || return 0
+  if ! printf '%s\n' "$1" > "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$dest"
 }
 
 append_note() {
@@ -78,6 +136,64 @@ dialog_suppressed() {
   return 1
 }
 
+sq() {
+  local s=$1 q
+  q=\'
+  s=${s//$q/$q\"$q\"$q}
+  printf '%s%s%s' "$q" "$s" "$q"
+}
+
+provider_cli() {
+  local name bin
+  name=$(provider_name)
+  case "$name" in
+    claude) bin=claude ;;
+    antigravity) bin=agy ;;
+    copilot) bin=copilot ;;
+    *) return 1 ;;
+  esac
+  command -v "$bin" 2>/dev/null
+}
+
+write_dialog_env() {
+  local dest=$1 name val cli resolved wrote_cli=0
+  resolved=
+  if [[ -z "${AAOS_AI_GATE_URL:-}" ]]; then
+    cli=$(provider_cli 2>/dev/null || true)
+    if [[ -n "$cli" ]]; then
+      resolved=$(dirname "$cli")
+    fi
+  fi
+  : > "$dest"
+  chmod 600 "$dest" || true
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    case "$name" in
+      AAOS_AI_GATE|AAOS_AI_GATE_*) ;;
+      *) continue ;;
+    esac
+    case "$name" in
+      AAOS_AI_GATE_STATE_FILE|AAOS_AI_GATE_VERDICT_FILE|AAOS_AI_GATE_NOTES|AAOS_AI_GATE_CONTEXT|AAOS_AI_GATE_DIALOG_LAUNCHED|AAOS_AI_GATE_MODE_FROM_ENV|AAOS_AI_GATE_TOP)
+        continue
+        ;;
+    esac
+    if [[ "$name" == "AAOS_AI_GATE_CLI_DIR" && -n "$resolved" ]]; then
+      continue
+    fi
+    if [[ "$name" == "AAOS_AI_GATE_CLI_DIR" ]]; then
+      wrote_cli=1
+    fi
+    val=${!name-}
+    printf '%s=%s\n' "$name" "$(sq "$val")" >> "$dest"
+  done < <(compgen -A export)
+  printf '%s=%s\n' AAOS_AI_GATE_TOP "$(sq "${TOP:-$PWD}")" >> "$dest"
+  if [[ -n "$resolved" ]]; then
+    printf '%s=%s\n' AAOS_AI_GATE_CLI_DIR "$(sq "$resolved")" >> "$dest"
+  elif [[ "$wrote_cli" -eq 0 && -n "${AAOS_AI_GATE_CLI_DIR:-}" && -z "${AAOS_AI_GATE_URL:-}" ]]; then
+    printf '%s=%s\n' AAOS_AI_GATE_CLI_DIR "$(sq "$AAOS_AI_GATE_CLI_DIR")" >> "$dest"
+  fi
+}
+
 to_windows_path() {
   if [[ "${AAOS_AI_GATE_WINDOWS_UI:-}" == "force" ]]; then
     printf '%s\n' "$1"
@@ -94,7 +210,7 @@ save_dialog_context() {
 
 offer_windows_dialog() {
   local verdict_file=$1
-  local dest script ps win_script win_data root conf top ask compile runtime effect interesting
+  local dest script ps win_script win_data root conf top ask compile runtime effect interesting linux_gate
   [[ "${AAOS_AI_GATE_DIALOG_LAUNCHED:-}" == 1 ]] && return 0
   windows_ui_available || return 0
   dialog_suppressed && return 0
@@ -148,6 +264,7 @@ offer_windows_dialog() {
   fi
   top=${TOP:-$PWD}
   conf=$top/.aaos-ai-gate.conf
+  write_dialog_env "$dest/env.conf"
   jq -n \
     --arg url "${AAOS_AI_GATE_URL:-}" \
     --arg token "${AAOS_AI_GATE_TOKEN:-}" \
@@ -156,7 +273,7 @@ offer_windows_dialog() {
     --arg auth "${AAOS_AI_GATE_AUTH:-}" \
     --arg distro "${WSL_DISTRO_NAME:-}" \
     --arg linuxScript "$linux_gate" \
-    --arg linuxConf "$conf" \
+    --arg linuxConf "$dest/env.conf" \
     --arg linuxData "$dest" \
     --arg conf "$(to_windows_path "$conf")" \
     --arg top "$(to_windows_path "$top")" \
@@ -213,12 +330,22 @@ replay_notes() {
   fi
 }
 
+conf_comment_ahead() {
+  local tail=$1
+  [[ "$tail" =~ ^[[:space:]]*# ]]
+}
+
 unquote_conf() {
-  local s=$1 i=0 n ch out= state=0
-  if [[ "$s" != \'* ]]; then
-    if [[ "$s" == \"*\" ]]; then
-      s=${s#\"}
-      s=${s%\"}
+  local s=$1 i=0 n ch out= state=0 tail
+  s=${s#"${s%%[![:space:]]*}"}
+  if [[ -z "$s" ]]; then
+    printf ''
+    return 0
+  fi
+  if [[ "$s" != \'* && "$s" != \"* ]]; then
+    if [[ "$s" == *" #"* ]]; then
+      s=${s%% #*}
+      s=${s%"${s##*[![:space:]]}"}
     fi
     printf '%s' "$s"
     return 0
@@ -226,9 +353,40 @@ unquote_conf() {
   n=${#s}
   local sq=\' dq=\" embed
   embed="${dq}${sq}${dq}"
+  if [[ "$s" == \"* ]]; then
+    i=1
+    state=1
+  fi
   while (( i < n )); do
     ch=${s:i:1}
+    if [[ "$s" == \"* ]]; then
+      if (( state == 1 )); then
+        if [[ "$ch" == '\' ]]; then
+          i=$((i + 1))
+          if (( i < n )); then
+            ch=${s:i:1}
+            out+=$ch
+          fi
+        elif [[ "$ch" == '"' ]]; then
+          state=0
+        else
+          out+=$ch
+        fi
+      else
+        tail=${s:i}
+        if conf_comment_ahead "$tail"; then
+          break
+        fi
+        out+=$ch
+      fi
+      i=$((i + 1))
+      continue
+    fi
     if (( state == 0 )); then
+      tail=${s:i}
+      if conf_comment_ahead "$tail"; then
+        break
+      fi
       if [[ "$ch" == "'" ]]; then
         state=1
       elif [[ "${s:i:3}" == "$embed" ]]; then
@@ -237,8 +395,10 @@ unquote_conf() {
         continue
       elif [[ "$ch" == '\' ]]; then
         i=$((i + 1))
-        ch=${s:i:1}
-        out+=$ch
+        if (( i < n )); then
+          ch=${s:i:1}
+          out+=$ch
+        fi
       else
         out+=$ch
       fi
@@ -253,18 +413,41 @@ unquote_conf() {
 }
 
 load_tree_conf() {
-  local conf line key val ccache_warn
-  conf=${TOP:-$PWD}/.aaos-ai-gate.conf
+  local conf line key val ccache_warn lineno
+  if [[ $# -ge 1 && -n "${1:-}" ]]; then
+    conf=$1
+  else
+    conf=${TOP:-$PWD}/.aaos-ai-gate.conf
+  fi
   [[ -f "$conf" ]] || return 0
   ccache_warn=0
+  lineno=0
   while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
     line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
     case "$line" in
       ''|\#*) continue ;;
     esac
+    if [[ "$line" == export[[:space:]]* ]]; then
+      line=${line#export}
+      line=${line#"${line%%[![:space:]]*}"}
+    fi
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    if [[ "$line" != *=* ]]; then
+      echo "ai-patch-gate: Konfiguration Zeile $lineno wird ignoriert" >&2
+      continue
+    fi
     key=${line%%=*}
-    val=$(unquote_conf "${line#*=}")
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    key=${key%"${key##*[![:space:]]}"}
+    val=${line#*=}
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "ai-patch-gate: Konfiguration Zeile $lineno wird ignoriert" >&2
+      continue
+    fi
+    val=$(unquote_conf "$val")
     case "$key" in
       AAOS_AI_GATE|AAOS_AI_GATE_*) ;;
       USE_CCACHE|CCACHE_EXEC|CCACHE_DIR|CCACHE_MAXSIZE)
@@ -341,9 +524,13 @@ cmd_post() {
 }
 
 fail_line() {
-  local kind=$1 text=$2
+  local kind=$1 text=$2 msg
   if [[ "$kind" == "ask" ]]; then
-    echo "ai-patch-gate: $text" >&2
+    msg="ai-patch-gate: $text"
+    echo "$msg" >&2
+    if [[ -n "${ASK_ANSWER:-}" ]]; then
+      printf '%s\n' "$msg" > "$ASK_ANSWER"
+    fi
   else
     echo "ai-patch-gate: $text, der Build startet trotzdem" >&2
   fi
@@ -469,7 +656,7 @@ http_post() {
   local url=$1 body=$2
   shift 2
   local cfg h rc
-  cfg=$(mktemp)
+  cfg=$(gate_mktemp)
   chmod 600 "$cfg" || true
   {
     printf '%s\n' 'silent'
@@ -557,7 +744,7 @@ anthropic_post() {
   if [[ "$kind" == "ask" ]]; then
     max=2048
   fi
-  body=$(mktemp)
+  body=$(gate_mktemp)
   jq -n --rawfile user "$prompt_file" --arg model "$model" --arg system "$system" --argjson max "$max" \
     '{model:$model, max_tokens:$max, system:$system, messages:[{role:"user", content:$user}]}' > "$body" || {
     rm -f "$body"
@@ -593,7 +780,7 @@ gemini_post() {
   if [[ "$kind" == "ask" ]]; then
     mime=text/plain
   fi
-  body=$(mktemp)
+  body=$(gate_mktemp)
   jq -n --rawfile user "$prompt_file" --arg system "$system" --arg mime "$mime" \
     '{systemInstruction:{parts:[{text:$system}]}, contents:[{role:"user", parts:[{text:$user}]}], generationConfig:{responseMimeType:$mime}}' > "$body" || {
     rm -f "$body"
@@ -629,7 +816,7 @@ openai_post() {
     fail_line "$kind" "curl fehlt"
     return 1
   fi
-  body=$(mktemp)
+  body=$(gate_mktemp)
   if [[ "$kind" == "ask" ]]; then
     jq -n --rawfile user "$prompt_file" --arg model "$model" --arg system "$system" \
       '{model:$model, messages:[{role:"system", content:$system},{role:"user", content:$user}]}' > "$body" || {
@@ -676,6 +863,10 @@ cli_claude() {
       --model "$model"
   ) < "$prompt_file" > "$out_file"
   rc=$?
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von claude"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von claude ist fehlgeschlagen"
     return 1
@@ -688,7 +879,7 @@ cli_agy() {
     fail_line "$kind" "agy ist nicht aufrufbar"
     return 1
   fi
-  wrapped=$(mktemp)
+  wrapped=$(gate_mktemp)
   {
     printf '%s\n\n' "$system"
     cat "$prompt_file"
@@ -702,6 +893,10 @@ cli_agy() {
   ) < "$wrapped" > "$out_file"
   rc=$?
   rm -f "$wrapped"
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von agy"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von agy ist fehlgeschlagen"
     return 1
@@ -714,7 +909,7 @@ cli_copilot() {
     fail_line "$kind" "copilot ist nicht aufrufbar"
     return 1
   fi
-  wrapped=$(mktemp)
+  wrapped=$(gate_mktemp)
   {
     printf '%s\n\n' "$system"
     cat "$prompt_file"
@@ -734,6 +929,10 @@ cli_copilot() {
   ) < "$wrapped" > "$out_file"
   rc=$?
   rm -f "$wrapped"
+  if [[ "$rc" -eq 124 ]]; then
+    fail_line "$kind" "Zeitlimit (55 s) beim Aufruf von copilot"
+    return 1
+  fi
   if [[ "$rc" -ne 0 ]]; then
     fail_line "$kind" "Anmeldung oder Aufruf von copilot ist fehlgeschlagen"
     return 1
@@ -796,16 +995,11 @@ screen_with_model() {
     finish_pre "$state_id" "$list" 0
   fi
   echo "ai-patch-gate: keeping ${cached_n} already compiled file(s), sending ${new_n} new file(s)"
-  write_state "${AAOS_AI_GATE_STATE_FILE:-}" "$state_id" "$list"
-  if [[ -n "${AAOS_AI_GATE_AWAITING:-}" ]]; then
-    : > "$AAOS_AI_GATE_AWAITING"
-  fi
-  out=$(mktemp)
+  out=$(gate_mktemp)
   if ! invoke_model verdict "$prompt_file" "$out"; then
-    rm -f "${AAOS_AI_GATE_AWAITING:-}" "$out"
+    rm -f "$out"
     finish_pre "$state_id" "$list" 0
   fi
-  rm -f "${AAOS_AI_GATE_AWAITING:-}"
   text=$(assistant_text "$out" || true)
   rm -f "$out"
   verdict=$(printf '%s' "$text" | parse_verdict_text 2>/dev/null || true)
@@ -830,8 +1024,19 @@ screen_with_model() {
   finish_pre "$state_id" "$list" 0
 }
 
+ask_fail() {
+  local msg=$1
+  echo "ai-patch-gate: $msg" >&2
+  if [[ -n "${ASK_ANSWER:-}" ]]; then
+    printf '%s\n' "ai-patch-gate: $msg" > "$ASK_ANSWER"
+  fi
+  exit 1
+}
+
 cmd_ask() {
-  local conf= context= question= history= prompt out text
+  local conf= context= question= history= answer= prompt out text err=
+  trap 'set +u; cleanup_gate_tmp; exit 130' TERM INT
+  ensure_gate_tmp
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --conf)
@@ -850,31 +1055,44 @@ cmd_ask() {
         history=${2:-}
         shift 2
         ;;
+      --answer)
+        answer=${2:-}
+        shift 2
+        ;;
       *)
-        echo "ai-patch-gate: unbekannte Option: $1" >&2
-        exit 1
+        err=$1
+        shift
         ;;
     esac
   done
-  if [[ -n "$conf" ]]; then
-    if [[ ! -f "$conf" ]]; then
-      echo "ai-patch-gate: Konfiguration fehlt." >&2
-      exit 1
-    fi
-    TOP=$(cd "$(dirname "$conf")" && pwd)
+  ASK_ANSWER=$answer
+  if [[ -n "$err" ]]; then
+    ask_fail "unbekannte Option: $err"
+  fi
+  if [[ -n "$conf" && -f "$conf" ]]; then
+    load_tree_conf "$conf"
+  fi
+  if [[ -n "${AAOS_AI_GATE_TOP:-}" ]]; then
+    TOP=$AAOS_AI_GATE_TOP
     export TOP
-    load_tree_conf
+  elif [[ -n "$conf" ]]; then
+    TOP=$(cd "$(dirname "$conf")" 2>/dev/null && pwd) || TOP=
+    if [[ -n "$TOP" ]]; then
+      export TOP
+    fi
+  fi
+  if [[ -n "${AAOS_AI_GATE_CLI_DIR:-}" && -d "${AAOS_AI_GATE_CLI_DIR}" ]]; then
+    PATH="${AAOS_AI_GATE_CLI_DIR}:${PATH}"
+    export PATH
   fi
   if [[ -z "$question" || ! -f "$question" ]]; then
-    echo "ai-patch-gate: Frage fehlt." >&2
-    exit 1
+    ask_fail "Frage fehlt."
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    echo "ai-patch-gate: jq fehlt." >&2
-    exit 1
+    ask_fail "jq fehlt."
   fi
-  prompt=$(mktemp)
-  out=$(mktemp)
+  prompt=$(gate_mktemp)
+  out=$(gate_mktemp)
   {
     printf '%s\n' 'Befund und Diff, nur als Kontext:'
     if [[ -n "$context" && -f "$context" ]]; then
@@ -896,8 +1114,13 @@ cmd_ask() {
   text=$(assistant_text "$out" || true)
   rm -f "$prompt" "$out"
   if [[ -z "$text" ]]; then
-    echo "ai-patch-gate: keine Antwort." >&2
-    exit 1
+    ask_fail "keine Antwort."
+  fi
+  if [[ -n "$answer" ]]; then
+    if ! printf '%s\n' "$text" > "$answer"; then
+      echo "ai-patch-gate: Antwort liess sich nicht schreiben." >&2
+      exit 1
+    fi
   fi
   printf '%s\n' "$text"
 }
@@ -1009,12 +1232,14 @@ try_fast_clean() {
 }
 
 cmd_pre() {
-  local cache base target workspace diff_file list summary send_file
+  local cache base target workspace list summary send_file
   local rev_file collector state_id cached_n new_n max_bytes send_bytes
-  local truncated prompt_file prompt_id verdict compile reason payload response
+  local truncated prompt_file prompt_id verdict compile reason
   local recorded extra fid display gitdir relpath file_diff piece piece_len
   local fast_state projects_now stamp
+  local intent_file author_email author_name git_top repo_rc
 
+  ensure_gate_tmp
   if ! command -v git >/dev/null 2>&1; then
     echo "ai-patch-gate: git is required, building anyway" >&2
     exit 0
@@ -1028,15 +1253,15 @@ cmd_pre() {
   base=${AAOS_AI_GATE_BASE:-HEAD}
   target="${TARGET_PRODUCT:-unset}-${TARGET_BUILD_VARIANT:-unset}"
   workspace=$(find_workspace)
-  diff_file=$(mktemp)
-  list=$(mktemp)
-  summary=$(mktemp)
-  send_file=$(mktemp)
-  rev_file=$(mktemp)
-  collector=$(mktemp)
-  intent_file=$(mktemp)
+  list=$(gate_mktemp)
+  summary=$(gate_mktemp)
+  send_file=$(gate_mktemp)
+  rev_file=$(gate_mktemp)
+  collector=$(gate_mktemp)
+  intent_file=$(gate_mktemp)
   prompt_file=
-  trap 'set +u; rm -f "$diff_file" "$list" "$summary" "$send_file" "$send_file.names" "$rev_file" "$collector" "$prompt_file" "$intent_file"' EXIT
+  trap 'set +u; cleanup_gate_tmp' EXIT
+  trap 'set +u; cleanup_gate_tmp; exit 130' TERM INT
 
   cat > "$collector" << 'COLLECT'
 set -u
@@ -1123,10 +1348,17 @@ COLLECT
     finish_pre "$fast_state" "$list" 0
   fi
   if [[ -d "$workspace/.repo" ]] && command -v repo >/dev/null 2>&1; then
+    repo_rc=0
     (
-      cd "$workspace"
+      cd "$workspace" || exit 1
       repo forall -c "bash \"$collector\""
-    ) || echo "ai-patch-gate: repo forall failed, looking at this git checkout only" >&2
+    ) || repo_rc=$?
+    if [[ "$repo_rc" -ne 0 ]]; then
+      : > "$list"
+      : > "$rev_file"
+      echo "ai-patch-gate: repo forall ist fehlgeschlagen, dieser m läuft ohne Prüfung" >&2
+      finish_pre "" "$list" 0
+    fi
   fi
   if [[ ! -s "$rev_file" ]]; then
     git_top=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")
@@ -1215,7 +1447,7 @@ COLLECT
       fi
     )
     piece=$(printf '%s\n' "$file_diff")
-    piece_len=${#piece}
+    piece_len=$(byte_len "$piece")
     if [[ $((send_bytes + piece_len)) -gt $max_bytes && $send_bytes -gt 0 ]]; then
       truncated=1
       break
@@ -1262,7 +1494,7 @@ COLLECT
   done
   head -c 12000 "$intent_file" > "$intent_file.cut"
   mv "$intent_file.cut" "$intent_file"
-  prompt_file=$(mktemp)
+  prompt_file=$(gate_mktemp)
   {
     printf 'intent sources:\n'
     cat "$intent_file"
@@ -1308,13 +1540,6 @@ kill_tree() {
     done
   fi
   kill -"$sig" "$pid" 2>/dev/null || true
-}
-
-kill_group() {
-  local pid=$1
-  [[ -n "$pid" ]] || return 0
-  kill_tree "$pid" TERM
-  kill_tree "$pid" KILL
 }
 
 consider_verdict() {
@@ -1405,6 +1630,9 @@ cmd_block() {
   export AAOS_AI_GATE_MODE=blocking
   mem=$(memory_dir)
   rundir=$(mktemp -d)
+  mkdir -p "$rundir/tmp"
+  chmod 700 "$rundir/tmp" || true
+  export AAOS_GATE_TMP=$rundir/tmp
   block_stopping=0
   export AAOS_AI_GATE_STATE_FILE=$rundir/state
   export AAOS_AI_GATE_VERDICT_FILE=$rundir/verdict
@@ -1447,7 +1675,7 @@ cmd_block() {
 }
 
 cmd_drive() {
-  local mem rundir gate_pid build_pid build_rc asked aborted state_id drive_stopping
+  local mem rundir gate_pid build_pid build_rc asked state_id drive_stopping
   if [[ $# -lt 1 ]]; then
     echo "ai-patch-gate: drive needs a build command" >&2
     exit 1
@@ -1455,25 +1683,40 @@ cmd_drive() {
   export AAOS_AI_GATE_MODE=parallel
   mem=$(memory_dir)
   rundir=$(mktemp -d)
+  mkdir -p "$rundir/tmp"
+  chmod 700 "$rundir/tmp" || true
+  export AAOS_GATE_TMP=$rundir/tmp
   gate_pid=
   build_pid=
   drive_stopping=0
   export AAOS_AI_GATE_STATE_FILE=$rundir/state
   export AAOS_AI_GATE_VERDICT_FILE=$rundir/verdict
-  export AAOS_AI_GATE_AWAITING=$rundir/awaiting-model
   export AAOS_AI_GATE_NOTES=$rundir/notes
   export AAOS_AI_GATE_CONTEXT=$rundir/context
   drive_stop() {
+    local ticks=0
     [[ "$drive_stopping" -eq 1 ]] && exit 130
     drive_stopping=1
     trap - INT TERM
-    kill_tree "$build_pid" INT
+    kill_tree "$build_pid" TERM
     kill_tree "$gate_pid" TERM
     sleep 0.2
-    kill_tree "$build_pid" KILL
     kill_tree "$gate_pid" KILL
-    [[ -n "$build_pid" ]] && wait "$build_pid" 2>/dev/null || true
-    [[ -n "$gate_pid" ]] && wait "$gate_pid" 2>/dev/null || true
+    ticks=1
+    while [[ -n "${build_pid:-}" ]] && kill -0 "$build_pid" 2>/dev/null; do
+      if [[ "$ticks" -ge 50 ]]; then
+        kill_tree "$build_pid" KILL
+        break
+      fi
+      sleep 0.2
+      ticks=$((ticks + 1))
+    done
+    if [[ -n "${build_pid:-}" ]]; then
+      wait "$build_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${gate_pid:-}" ]]; then
+      wait "$gate_pid" 2>/dev/null || true
+    fi
     rm -rf "$rundir"
     exit 130
   }
@@ -1483,15 +1726,10 @@ cmd_drive() {
   "$@" &
   build_pid=$!
   asked=0
-  aborted=0
   while kill -0 "$build_pid" 2>/dev/null; do
     if [[ "$asked" -eq 0 && -s "$AAOS_AI_GATE_VERDICT_FILE" ]]; then
       state_id=$(awk '/^STATE / {print $2; exit}' "$AAOS_AI_GATE_STATE_FILE" 2>/dev/null || true)
-      if ! consider_verdict "$AAOS_AI_GATE_VERDICT_FILE" "$mem" "$state_id"; then
-        aborted=1
-        kill_tree "$build_pid" TERM
-        break
-      fi
+      consider_verdict "$AAOS_AI_GATE_VERDICT_FILE" "$mem" "$state_id" || true
       offer_windows_dialog "$AAOS_AI_GATE_VERDICT_FILE"
       asked=1
     fi
@@ -1499,14 +1737,6 @@ cmd_drive() {
   done
   wait "$build_pid" 2>/dev/null
   build_rc=$?
-
-  if [[ "$aborted" -eq 1 ]]; then
-    kill_tree "$gate_pid" TERM
-    wait "$gate_pid" 2>/dev/null || true
-    trap - INT TERM
-    rm -rf "$rundir"
-    exit 2
-  fi
 
   if kill -0 "$gate_pid" 2>/dev/null; then
     if [[ -s "$AAOS_AI_GATE_VERDICT_FILE" ]]; then
@@ -1518,6 +1748,9 @@ cmd_drive() {
       wait "$gate_pid" 2>/dev/null || true
       echo "ai-patch-gate: Modell-Anfrage abgebrochen, der nächste m prüft erneut"
       append_note "ai-patch-gate: Modell-Anfrage abgebrochen, der nächste m prüft erneut"
+      if [[ ! -s "${AAOS_AI_GATE_VERDICT_FILE:-}" ]]; then
+        rm -f "$AAOS_AI_GATE_STATE_FILE"
+      fi
     fi
   else
     wait "$gate_pid" 2>/dev/null || true
