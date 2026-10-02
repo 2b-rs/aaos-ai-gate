@@ -200,7 +200,7 @@ $btnMode.Text = 'Auf blockierend umstellen'
 $btnMode.Location = New-Object System.Drawing.Point(16, 464)
 $btnMode.Size = New-Object System.Drawing.Size(220, 32)
 $form.Controls.Add($btnMode)
-$modeTip = 'Der nächste m fragt vor dem Build. Ein klarer Compile-Bruch startet den Build dann nicht. Dieser Build läuft zu Ende.'
+$modeTip = 'Der nächste m fragt vor dem Build. Bei einem erwarteten Compile-Bruch fragt er, ob trotzdem gebaut wird. Dieser Build läuft zu Ende.'
 if ($meta.modeFromEnv -eq 'yes') {
   $modeTip = 'Schreibt blockierend in die Konfiguration im Baum. AAOS_AI_GATE_MODE steht zusätzlich in der Shell und gewinnt, bis es dort geändert wird. Dieser Build läuft zu Ende.'
 }
