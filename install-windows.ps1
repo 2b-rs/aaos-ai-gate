@@ -90,6 +90,7 @@ if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GA
   exit $?
 fi
 
+
 '@
   $block = $block.Replace("`r`n", "`n")
   $wrapGate = '_wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run --'
