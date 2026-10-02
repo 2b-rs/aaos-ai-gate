@@ -5,11 +5,11 @@ Der Gate hängt an `m` (`build/soong/bin/m`) und schaut sich die aktuellen Ände
 Zwei Betriebsarten:
 
 - **blockierend, Vorabtest** ist die Voreinstellung. Frage und Urteil stehen, bevor Ninja startet. `So beabsichtigt? [j/N]` wartet auf eine Antwort. `j`, `ja`, `y` oder `yes` lässt den Build zu, auch wenn das Modell `likely_fail` sagt, und dieses Ja wird gemerkt. Die Eingabetaste, `n` oder alles andere stoppt nur diesen Lauf und wird nicht gemerkt. Der nächste `m` fragt wieder. Sieht das Modell einen Compile-Bruch und fragt nicht selbst, lautet die Frage `Sieht nicht kompilierbar aus. Trotzdem bauen?`. Ein Stand, der schon einmal fehlgeschlagen ist, startet trotzdem. Die Zeile sagt das. Das Modell wird für genau diesen Stand nicht noch einmal gefragt.
-- **parallel, nur Hinweis** startet den Build zusammen mit der Anfrage und bricht ihn von selbst nicht ab. Hinweise können im Ninja-Log nach oben rutschen. Nach dem Build stehen sie noch einmal im Terminal zwischen `----- ai-patch-gate -----`. Wird der Build fertig, während die Anfrage noch läuft, bricht der Gate die Anfrage ab. Der nächste `m` prüft erneut. Es gibt keine 24-Stunden-Pause. Strg-C und der Stop-Button der IDE beenden den Build. Unter Windows öffnet derselbe Modus bei einem konkreten Verdacht zusätzlich ein Fenster mit Rückfrage an das Modell. Auf Linux bleibt es beim Terminal.
+- **parallel, nur Hinweis** startet den Build zusammen mit der Anfrage und bricht ihn von selbst nicht ab. `suggest` und `suggest-only` sind derselbe parallele Hinweis. Jeder andere Wert von `AAOS_AI_GATE_MODE` gilt als blockierend. Hinweise können im Ninja-Log nach oben rutschen. Nach dem Build stehen sie noch einmal im Terminal zwischen `----- ai-patch-gate -----`. Wird der Build fertig, während die Anfrage noch läuft, bricht der Gate die Anfrage ab. Der nächste `m` prüft erneut. Es gibt keine 24-Stunden-Pause. Strg-C und der Stop-Button der IDE beenden den Build. Unter Windows öffnet derselbe Modus bei einem konkreten Verdacht zusätzlich ein Fenster mit Rückfrage an das Modell. Auf Linux bleibt es beim Terminal.
 
-Ohne Terminal wird die Frage gedruckt und der Build startet. `AAOS_AI_GATE=stop` ist die einzige harte Weigerung, und nur bei `likely_fail`: dann startet der Build nicht, und es wird nicht gefragt. Die vom Installer geschriebene Datei setzt `AAOS_AI_GATE=on`.
+Ohne Terminal wird die Frage gedruckt und der Build startet. `AAOS_AI_GATE=stop` ist die einzige harte Weigerung, nur bei `likely_fail`, und nur im blockierenden Modus: dann startet der Build nicht, und es wird nicht gefragt. Im parallelen Modus läuft der Build weiter. Die vom Installer geschriebene Datei setzt `AAOS_AI_GATE=on`.
 
-Die Absicht kommt aus den letzten Commits desselben Autors, dem Stash und dem aktuellen Diff. Der Diff geht mit 20 Zeilen Kontext. Ein Ja liegt in `out/.aaos-ai-gate/answers`. `m clean` löscht nur dieses Verzeichnis im Build-Baum. Der Diff-Cache unter `~/.cache/aaos-ai-gate` bleibt, einschließlich der gemerkten Compile-Ergebnisse. Ein Abbruch, Strg-C oder ein Rückgabewert ab 128 wird nicht als Compile-Fehler gemerkt.
+Die Absicht kommt aus den letzten Commits desselben Autors, dem Stash und dem aktuellen Diff. Der Diff geht mit 20 Zeilen Kontext. Ein Ja liegt in `out/.aaos-ai-gate/answers`. `m clean` löscht nur dieses Verzeichnis im Build-Baum. `OUT_DIR_COMMON_BASE` liest der Gate nicht: die gemerkten Antworten liegen unter `OUT_DIR` oder, wenn das nicht gesetzt ist, unter `out` im Baum, auch wenn der gemeinsame Out-Pfad woanders steht. Der Diff-Cache unter `~/.cache/aaos-ai-gate` bleibt, einschließlich der gemerkten Compile-Ergebnisse. Ein Abbruch, Strg-C oder ein Rückgabewert ab 128 wird nicht als Compile-Fehler gemerkt.
 
 Diff, der oberste Stash (`git stash show -p`, gekürzt) und die Betreffzeilen der letzten Commits gehen an den Anbieter. Claude mit Token an api.anthropic.com, Antigravity mit Token an Google, Copilot und jedes Abonnement an die jeweilige Kommandozeile, eine eigene URL an diese URL. Die eigenen Gate-Dateien schickt er nicht mit: das Skript, der Dialog, die Konfiguration und ein `m`, das nur den Hook enthält. Eine echte Änderung in `m` geht mit.
 
@@ -31,7 +31,7 @@ Ohne Terminal: `AAOS_INSTALL_TREE`, `AAOS_INSTALL_MODE` (`blocking` oder `parall
 
 Der Installer schreibt nur in diesen Baum: `build/soong/bin/ai-patch-gate.sh`, `aaos-ai-gate-dialog.ps1` und die wenigen Zeilen in `build/soong/bin/m`. Er ändert `~/.bashrc` nicht. Fehlt in `m` die Zeile `_wrap_build "$TOP/build/soong/soong_ui.bash"`, kopiert er das Skript trotzdem und druckt den Block zum Einsetzen.
 
-Solange die Umgebung nicht selbst eingetragen wird, entsteht `$TOP/.aaos-ai-gate.conf`, nur für den eigenen Benutzer lesbar. `m` ruft den Gate auf, wenn diese Datei existiert oder `AAOS_AI_GATE` gesetzt ist. Variablen aus der Shell gewinnen gegenüber der Datei. Die Datei setzt nur `AAOS_AI_GATE` und Namen mit `AAOS_AI_GATE_`. `PATH`, `LD_PRELOAD` und ccache-Zeilen darin bleiben wirkungslos. In einem Git-Checkout am Baumwurzelverzeichnis kommt der Dateiname in `.git/info/exclude`, damit der Token nicht mit committed wird. Ein AOSP-`repo`-Baum versioniert die Wurzel ohnehin nicht.
+Solange die Umgebung nicht selbst eingetragen wird, entsteht `$TOP/.aaos-ai-gate.conf`, nur für den eigenen Benutzer lesbar. `m` ruft den Gate auf, wenn diese Datei existiert oder `AAOS_AI_GATE` oder `AAOS_AI_GATE_MODE` gesetzt ist. Variablen aus der Shell gewinnen gegenüber der Datei. Die Datei setzt nur `AAOS_AI_GATE` und Namen mit `AAOS_AI_GATE_`. `PATH`, `LD_PRELOAD` und ccache-Zeilen darin bleiben wirkungslos. In einem Git-Checkout am Baumwurzelverzeichnis kommt der Dateiname in `.git/info/exclude`, damit der Token nicht mit committed wird. Ein AOSP-`repo`-Baum versioniert die Wurzel ohnehin nicht.
 
 Die Gate-Skripte trägt er in die Ausschlussliste von `build/soong` ein und markiert `build/soong/bin/m` mit `skip-worktree`, damit `repo status` den Hook nicht als lokale Änderung zeigt. Rückgängig: `git -C build/soong update-index --no-skip-worktree bin/m`.
 
@@ -77,13 +77,13 @@ export AAOS_AI_GATE_PROVIDER=claude
 export AAOS_AI_GATE_AUTH=subscription
 ```
 
-`AAOS_AI_GATE_AUTH=token` braucht zusätzlich `AAOS_AI_GATE_TOKEN`. Copilot heißt `copilot`, Antigravity `antigravity`. Ein Modellname ist nur nötig, wenn man von der Voreinstellung des Anbieters weg will.
+`AAOS_AI_GATE_AUTH=token` braucht zusätzlich `AAOS_AI_GATE_TOKEN`. Copilot heißt `copilot`, Antigravity `antigravity`. `agy` ist derselbe Anbieter wie `antigravity`. Ein Modellname ist nur nötig, wenn man von der Voreinstellung des Anbieters weg will. Der Hook in `m` feuert auch, wenn nur `AAOS_AI_GATE_MODE` gesetzt ist.
 
 | Variable | Bedeutung |
 |---|---|
-| `AAOS_AI_GATE` | `on` schaltet den Gate ein. `stop` ist die einzige harte Weigerung, und nur bei `likely_fail`. Die Datei des Installers setzt `on`. |
-| `AAOS_AI_GATE_MODE` | `blocking` für den Vorabtest, `parallel` für nur Hinweis. Ohne Setzen gilt `blocking`. |
-| `AAOS_AI_GATE_PROVIDER` | `claude`, `copilot` oder `antigravity`. |
+| `AAOS_AI_GATE` | `on` schaltet den Gate ein. `stop` ist die einzige harte Weigerung, nur bei `likely_fail` und nur im blockierenden Modus. Die Datei des Installers setzt `on`. |
+| `AAOS_AI_GATE_MODE` | `blocking` für den Vorabtest. `parallel`, `suggest` und `suggest-only` für nur Hinweis. Jeder andere Wert gilt als `blocking`. Ohne Setzen gilt `blocking`. |
+| `AAOS_AI_GATE_PROVIDER` | `claude`, `copilot`, `antigravity` oder `agy` (gleichbedeutend mit `antigravity`). |
 | `AAOS_AI_GATE_AUTH` | `subscription` für die vorhandene Anmeldung, `token` für ein API-Token. |
 | `AAOS_AI_GATE_TOKEN` | Nur bei `token`, oder wenn eine eigene URL gesetzt ist. |
 | `AAOS_AI_GATE_URL` | Nur auf ausdrücklichen Wunsch. Ersetzt dann den Anbieter. Die Anmeldung der Kommandozeile gilt dort nicht, das Token ist Pflicht. |
