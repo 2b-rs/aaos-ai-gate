@@ -125,7 +125,7 @@ cli_gap_note() {
 }
 
 sq() {
-  python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$1"
+  printf '%s' "$1" | python3 -c 'import shlex,sys; print(shlex.quote(sys.stdin.read()))'
 }
 
 expand_tilde() {
@@ -176,7 +176,7 @@ try_install_ccache() {
 }
 
 hide_gate_from_git() {
-  local tree=$1 soong gitdir name
+  local tree=$1 skip_m=${2:-no} soong gitdir name
   soong=$tree/build/soong
   if [[ -e "$soong/.git" ]]; then
     gitdir=$(git -C "$soong" rev-parse --git-dir 2>/dev/null || true)
@@ -190,7 +190,7 @@ hide_gate_from_git() {
       for name in bin/ai-patch-gate.sh bin/aaos-ai-gate-dialog.ps1; do
         grep -qxF "$name" "$gitdir/info/exclude" || printf '%s\n' "$name" >> "$gitdir/info/exclude"
       done
-      if git -C "$soong" ls-files --error-unmatch -- bin/m >/dev/null 2>&1; then
+      if [[ "$skip_m" == yes ]] && git -C "$soong" ls-files --error-unmatch -- bin/m >/dev/null 2>&1; then
         git -C "$soong" update-index --skip-worktree -- bin/m
         printf '%s\n' "build/soong/bin/m ist mit skip-worktree markiert. repo status zeigt den Hook nicht."
         printf '%s\n' "Rueckgaengig: git -C build/soong update-index --no-skip-worktree bin/m"
@@ -207,15 +207,23 @@ hide_gate_from_git() {
 }
 
 strip_exclude_line() {
-  local file=$1 name=$2 tmp
+  local file=$1 name=$2 tmp rc
   [[ -f "$file" ]] || return 0
   tmp=$(mktemp)
-  grep -vxF "$name" "$file" > "$tmp" || true
-  mv "$tmp" "$file"
+  set +e
+  grep -vxF "$name" "$file" > "$tmp"
+  rc=$?
+  set -e
+  if [[ "$rc" -gt 1 ]]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  cp "$tmp" "$file"
+  rm -f "$tmp"
 }
 
 do_uninstall() {
-  local tree soong gitdir ccache_note
+  local tree soong gitdir ccache_note hook_out
   ask AAOS_INSTALL_TREE "Quellbaum (Verzeichnis mit build/envsetup.sh)"
   tree=$(cd "$AAOS_INSTALL_TREE" 2>/dev/null && pwd) || die "Quellbaum nicht gefunden: $AAOS_INSTALL_TREE"
   ccache_note=no
@@ -224,8 +232,8 @@ do_uninstall() {
   fi
   [[ -f "$tree/build/soong/bin/m" ]] || die "Das ist kein AAOS/AOSP-Baum: build/soong/bin/m fehlt."
   soong=$tree/build/soong
-  python3 - "$soong/bin/m" << 'PY'
-import pathlib, sys
+  hook_out=$(python3 - "$soong/bin/m" << 'PY'
+import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 start = text.find('if [[ -f "$TOP/.aaos-ai-gate.conf"')
@@ -234,16 +242,26 @@ if start < 0:
     raise SystemExit(0)
 line_start = text.rfind("\n", 0, start)
 line_start = 0 if line_start < 0 else line_start + 1
-fi = text.find("\nfi\n", start)
-if fi < 0 or "ai-patch-gate.sh" not in text[line_start:fi]:
+m = re.search(r"\n[ \t]*fi\r?\n", text[start:])
+if not m or "ai-patch-gate.sh" not in text[line_start:start + m.end()]:
     print("Hook unvollstaendig, m bleibt unveraendert.")
     raise SystemExit(0)
-end = fi + len("\nfi\n")
-if text[end:end + 1] == "\n":
+end = start + m.end()
+if end < len(text) and text[end] == "\n":
     end += 1
 path.write_text(text[:line_start] + text[end:])
 print("Hook aus m entfernt.")
 PY
+)
+  printf '%s\n' "$hook_out"
+  if printf '%s' "$hook_out" | grep -q 'Hook unvollstaendig'; then
+    printf '%s\n' "Skripte und Konfiguration bleiben. m von Hand pruefen."
+    exit 3
+  fi
+  if grep -q 'ai-patch-gate.sh' "$soong/bin/m"; then
+    printf '%s\n' "Hook in m ist noch vorhanden. Skripte und Konfiguration bleiben."
+    exit 3
+  fi
   rm -f "$soong/bin/ai-patch-gate.sh" "$soong/bin/aaos-ai-gate-dialog.ps1"
   rm -f "$tree/.aaos-ai-gate.conf" "$tree/.aaos-ai-gate.dialog-off"
   if [[ -e "$soong/.git" ]]; then
@@ -432,9 +450,6 @@ do_ccache=no
 if [[ "$self_env" == yes ]]; then
   ask AAOS_INSTALL_CCACHE "ccache in ~/.bashrc (USE_CCACHE, Cache-Groesse)" "nein"
   if is_yes "$AAOS_INSTALL_CCACHE"; then
-    if [[ -z "${AAOS_INSTALL_CCACHE_EXEC:-}" ]] && command -v ccache >/dev/null 2>&1; then
-      AAOS_INSTALL_CCACHE_EXEC=$(command -v ccache)
-    fi
     try_install_ccache
     if [[ -x "${AAOS_INSTALL_CCACHE_EXEC:-}" ]]; then
       do_ccache=yes
@@ -453,32 +468,55 @@ install -m 755 "$payload" "$tree/build/soong/bin/ai-patch-gate.sh"
 if [[ -f "$here/aaos-ai-gate-dialog.ps1" ]]; then
   install -m 644 "$here/aaos-ai-gate-dialog.ps1" "$tree/build/soong/bin/aaos-ai-gate-dialog.ps1"
 fi
-hide_gate_from_git "$tree"
-
 hook_status=$(python3 - "$tree/build/soong/bin/m" << 'PY'
-import pathlib, sys
+import pathlib, re, sys
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 block = "\n".join([
     'if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GATE_MODE:-}" ]]; then',
     '  export TOP',
-    '  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \\',
+    '  _wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \\',
     '    "$TOP/build/soong/soong_ui.bash" --build-mode --all-modules --dir="$(pwd)" "$@"',
     '  exit $?',
     'fi',
     '',
 ]) + "\n"
-if 'ai-patch-gate.sh" run' in text and "export TOP" in text:
+wrap_gate = '_wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run --'
+if wrap_gate in text and "export TOP" in text:
     print("vorhanden")
     raise SystemExit(0)
-text2 = text.replace('ai-patch-gate.sh" drive', 'ai-patch-gate.sh" run', 1)
-if 'ai-patch-gate.sh" run' in text2:
-    old = '  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \\\n'
-    if "export TOP" not in text2 and old in text2:
-        text2 = text2.replace(old, "  export TOP\n" + old, 1)
-    if text2 != text:
-        path.write_text(text2)
-    print("aktualisiert")
+
+def hook_span(s):
+    start = s.find('if [[ -f "$TOP/.aaos-ai-gate.conf"')
+    if start < 0:
+        return None
+    line_start = s.rfind("\n", 0, start)
+    line_start = 0 if line_start < 0 else line_start + 1
+    m = re.search(r"\n[ \t]*fi\r?\n", s[start:])
+    if not m:
+        return None
+    end = start + m.end()
+    if "ai-patch-gate.sh" not in s[line_start:end]:
+        return None
+    if end < len(s) and s[end] == "\n":
+        end += 1
+    return line_start, end
+
+span = hook_span(text)
+if span:
+    line_start, end = span
+    new = text[:line_start] + block + text[end:]
+    if new != text:
+        path.write_text(new)
+        print("aktualisiert")
+    else:
+        print("vorhanden")
+    raise SystemExit(0)
+if 'ai-patch-gate.sh" run' in text or 'ai-patch-gate.sh" drive' in text:
+    if "export TOP" not in text:
+        print("vorhanden, ohne export TOP")
+    else:
+        print("vorhanden, Hook unvollstaendig")
     raise SystemExit(0)
 needle = '_wrap_build "$TOP/build/soong/soong_ui.bash"'
 idx = text.find(needle)
@@ -491,12 +529,23 @@ print("eingefuegt")
 PY
 )
 
+printf '%s\n' "Hook in m: $hook_status."
+if [[ "$hook_status" == "vorhanden, ohne export TOP" || "$hook_status" == "vorhanden, Hook unvollstaendig" ]]; then
+  printf '%s\n' "Hinweis: der vorhandene Block wurde nicht geaendert. Den Hook in build/soong/bin/m von Hand pruefen."
+fi
+
+skip_m=no
+case "$hook_status" in
+  eingefuegt|aktualisiert|vorhanden) skip_m=yes ;;
+esac
+hide_gate_from_git "$tree" "$skip_m"
+
 if [[ "$hook_status" == "fehlt" ]]; then
   printf '%s\n' "m enthaelt nicht die erwartete Zeile _wrap_build \"\$TOP/build/soong/soong_ui.bash\"."
   printf '%s\n' "Das Skript liegt in build/soong/bin/ai-patch-gate.sh. Diese Zeilen von Hand vor dem Build-Aufruf in build/soong/bin/m setzen:"
   printf '%s\n' 'if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GATE_MODE:-}" ]]; then'
   printf '%s\n' '  export TOP'
-  printf '%s\n' '  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \'
+  printf '%s\n' '  _wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \'
   printf '%s\n' '    "$TOP/build/soong/soong_ui.bash" --build-mode --all-modules --dir="$(pwd)" "$@"'
   printf '%s\n' '  exit $?'
   printf '%s\n' 'fi'
@@ -531,10 +580,11 @@ if [[ "$self_env" == yes ]]; then
   if [[ "$provider_detected" == yes ]]; then
     printf '%s\n' "Anbieter erkannt: $(provider_label "$provider")."
   fi
-  python3 - "$mode" "$provider" "$auth" "$AAOS_INSTALL_URL" "$AAOS_INSTALL_TOKEN" "$AAOS_INSTALL_MODEL" \
+  AAOS_INSTALL_TOKEN="$AAOS_INSTALL_TOKEN" python3 - "$mode" "$provider" "$auth" "$AAOS_INSTALL_URL" "$AAOS_INSTALL_MODEL" \
     "$do_ccache" "$AAOS_INSTALL_CCACHE_EXEC" "$AAOS_INSTALL_CCACHE_DIR" "$AAOS_INSTALL_CCACHE_SIZE" << 'PY'
-import shlex, sys
-mode, provider, auth, url, token, model, do, exe, cdir, size = sys.argv[1:11]
+import os, shlex, sys
+mode, provider, auth, url, model, do, exe, cdir, size = sys.argv[1:10]
+token = os.environ.get("AAOS_INSTALL_TOKEN", "")
 names = {
     "claude": "Claude",
     "copilot": "Microsoft Copilot",
@@ -597,6 +647,7 @@ PY
 fi
 
 conf=$(mktemp)
+trap 'rm -f "$conf"' EXIT
 {
   printf '%s\n' '# aaos ai-patch-gate. Nur dieser Baum. Nicht committen.'
   printf 'AAOS_AI_GATE=%s\n' "$(sq on)"

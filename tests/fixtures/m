@@ -1,0 +1,9 @@
+#!/bin/bash
+
+source $(cd $(dirname $BASH_SOURCE) >/dev/null 2>&1 && pwd)/../../make/shell_utils.sh
+
+require_top
+
+_wrap_build "$TOP/build/soong/soong_ui.bash" --build-mode --all-modules --dir="$(pwd)" "$@"
+
+exit $?

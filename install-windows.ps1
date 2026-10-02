@@ -10,10 +10,15 @@ foreach ($a in $args) {
 
 if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
   $hostExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $quoted = '"' + ($PSCommandPath -replace '"', '`"') + '"'
-  $arg = "-NoProfile -STA -File $quoted"
+  if ($script:WantUninstall) {
+    $childArgs = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath) + @($args)
+    & $hostExe @childArgs
+    exit $LASTEXITCODE
+  }
+  $quotedFile = '"' + ($PSCommandPath -replace '"', '""') + '"'
+  $arg = "-NoProfile -STA -ExecutionPolicy Bypass -File $quotedFile"
   foreach ($a in $args) {
-    $arg += ' "' + (([string]$a) -replace '"', '`"') + '"'
+    $arg += ' "' + (([string]$a) -replace '"', '""') + '"'
   }
   $proc = Start-Process -FilePath $hostExe -ArgumentList $arg -Wait -PassThru
   exit $proc.ExitCode
@@ -61,26 +66,50 @@ function Test-AaosTree([string]$Tree) {
   return $true
 }
 
+function Get-HookSpan([string]$Text) {
+  $marker = 'if [[ -f "$TOP/.aaos-ai-gate.conf"'
+  $start = $Text.IndexOf($marker)
+  if ($start -lt 0) { return $null }
+  $lineStart = $Text.LastIndexOf("`n", $start)
+  if ($lineStart -lt 0) { $lineStart = 0 } else { $lineStart += 1 }
+  $m = [regex]::Match($Text.Substring($start), '\n[ \t]*fi\r?\n')
+  if (-not $m.Success) { return $null }
+  $end = $start + $m.Index + $m.Length
+  $chunk = $Text.Substring($lineStart, $end - $lineStart)
+  if (-not $chunk.Contains('ai-patch-gate.sh')) { return $null }
+  if ($end -lt $Text.Length -and $Text[$end] -eq "`n") { $end += 1 }
+  return @{ Start = $lineStart; End = $end }
+}
+
 function Update-BuildEntry([string]$Text) {
   $block = @'
 if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GATE_MODE:-}" ]]; then
   export TOP
-  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \
+  _wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \
     "$TOP/build/soong/soong_ui.bash" --build-mode --all-modules --dir="$(pwd)" "$@"
   exit $?
 fi
 
+
 '@
-  if ($Text.Contains('ai-patch-gate.sh" run') -and $Text.Contains('export TOP')) {
+  $block = $block.Replace("`r`n", "`n")
+  $wrapGate = '_wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run --'
+  if ($Text.Contains($wrapGate) -and $Text.Contains('export TOP')) {
     return @{ Text = $Text; Status = 'vorhanden' }
   }
-  $updated = $Text.Replace('ai-patch-gate.sh" drive', 'ai-patch-gate.sh" run')
-  if ($updated.Contains('ai-patch-gate.sh" run')) {
-    $old = '  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- ' + [char]92
-    if ($updated.Contains($old) -and -not $updated.Contains('export TOP')) {
-      $updated = $updated.Replace($old, "  export TOP`n" + $old)
+  $span = Get-HookSpan $Text
+  if ($null -ne $span) {
+    $newText = $Text.Remove($span.Start, $span.End - $span.Start).Insert($span.Start, $block)
+    if ($newText -ceq $Text) {
+      return @{ Text = $newText; Status = 'vorhanden' }
     }
-    return @{ Text = $updated; Status = 'aktualisiert' }
+    return @{ Text = $newText; Status = 'aktualisiert' }
+  }
+  if ($Text.Contains('ai-patch-gate.sh" run') -or $Text.Contains('ai-patch-gate.sh" drive')) {
+    if (-not $Text.Contains('export TOP')) {
+      return @{ Text = $Text; Status = 'vorhanden, ohne export TOP' }
+    }
+    return @{ Text = $Text; Status = 'vorhanden, Hook unvollstaendig' }
   }
   $needle = '_wrap_build "$TOP/build/soong/soong_ui.bash"'
   $idx = $Text.IndexOf($needle)
@@ -93,12 +122,40 @@ fi
 }
 
 function Invoke-WslCommand([string]$Distro, [string]$Bash) {
-  if ($Distro) {
-    & wsl.exe -d $Distro -e bash -lc $Bash
-  } else {
-    & wsl.exe -e bash -lc $Bash
+  $prevEnc = [Console]::OutputEncoding
+  $prevWsl = [Environment]::GetEnvironmentVariable('WSL_UTF8', 'Process')
+  try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    [Environment]::SetEnvironmentVariable('WSL_UTF8', '1', 'Process')
+    if ($Distro) {
+      $null = & wsl.exe -d $Distro -e bash -lc $Bash
+    } else {
+      $null = & wsl.exe -e bash -lc $Bash
+    }
+    return [int]$LASTEXITCODE
+  } finally {
+    [Console]::OutputEncoding = $prevEnc
+    [Environment]::SetEnvironmentVariable('WSL_UTF8', $prevWsl, 'Process')
   }
-  return $LASTEXITCODE
+}
+
+function Invoke-WslCapture([string]$Distro, [string]$Bash) {
+  $prevEnc = [Console]::OutputEncoding
+  $prevWsl = [Environment]::GetEnvironmentVariable('WSL_UTF8', 'Process')
+  try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    [Environment]::SetEnvironmentVariable('WSL_UTF8', '1', 'Process')
+    if ($Distro) {
+      $out = & wsl.exe -d $Distro -e bash -lc $Bash
+    } else {
+      $out = & wsl.exe -e bash -lc $Bash
+    }
+    $script:LastWslExit = $LASTEXITCODE
+    return $out
+  } finally {
+    [Console]::OutputEncoding = $prevEnc
+    [Environment]::SetEnvironmentVariable('WSL_UTF8', $prevWsl, 'Process')
+  }
 }
 
 function Set-LinuxMode([hashtable]$Loc, [string]$LinuxPath, [string]$Mode) {
@@ -116,7 +173,7 @@ function Set-LinuxMode([hashtable]$Loc, [string]$LinuxPath, [string]$Mode) {
 function Test-DistroCommand([hashtable]$Loc, [string]$Bash) {
   if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $false }
   $code = Invoke-WslCommand $Loc.Distro $Bash
-  return ($code -eq 0)
+  return ([int]$code -eq 0)
 }
 
 function Hide-GateFromGit([hashtable]$Loc) {
@@ -152,11 +209,7 @@ if [ -d "$tree/.git" ]; then
 fi
 '@
   $bash = $bash.Replace('__TREE__', (Quote-Bash $Loc.Linux))
-  if ($Loc.Distro) {
-    $out = & wsl.exe -d $Loc.Distro -e bash -lc $bash
-  } else {
-    $out = & wsl.exe -e bash -lc $bash
-  }
+  $out = Invoke-WslCapture $Loc.Distro $bash
   if (($out -join "`n") -match 'SKIP') {
     return "build/soong/bin/m ist mit skip-worktree markiert. Rueckgaengig: git -C build/soong update-index --no-skip-worktree bin/m"
   }
@@ -172,25 +225,22 @@ function Uninstall-GatePath([string]$Tree) {
   $text = [System.IO.File]::ReadAllText($mPath)
   $start = $text.IndexOf('if [[ -f "$TOP/.aaos-ai-gate.conf"')
   if ($start -ge 0) {
-    $lineStart = $text.LastIndexOf("`n", $start)
-    if ($lineStart -lt 0) { $lineStart = 0 } else { $lineStart += 1 }
-    $tail = $text.Substring($start)
-    $match = [regex]::Match($tail, "(?m)^fi\r?$")
-    if ($match.Success -and $text.Substring($lineStart, $match.Index).Contains('ai-patch-gate.sh')) {
-      $end = $start + $match.Index + $match.Length
-      if ($end -lt $text.Length -and $text[$end] -eq "`r") { $end += 1 }
-      if ($end -lt $text.Length -and $text[$end] -eq "`n") { $end += 1 }
-      if ($end -lt $text.Length -and $text[$end] -eq "`n") { $end += 1 }
-      $text = $text.Remove($lineStart, $end - $lineStart)
-      [System.IO.File]::WriteAllText($mPath, $text, $utf8)
+    $span = Get-HookSpan $text
+    if ($null -eq $span) {
+      throw 'Hook unvollstaendig, m bleibt unveraendert. Skripte und Konfiguration bleiben.'
     }
+    $text = $text.Remove($span.Start, $span.End - $span.Start)
+    [System.IO.File]::WriteAllText($mPath, $text, $utf8)
+  }
+  if ($text.Contains('ai-patch-gate.sh')) {
+    throw 'Hook in m ist noch vorhanden. Skripte und Konfiguration bleiben.'
   }
   $ccacheWarn = ''
   $confBefore = Join-Path $Tree '.aaos-ai-gate.conf'
   if (Test-Path -LiteralPath $confBefore) {
     $confText = [System.IO.File]::ReadAllText($confBefore)
     if ($confText -match '(?m)^(USE_CCACHE|CCACHE_EXEC|CCACHE_DIR|CCACHE_MAXSIZE)=') {
-      $ccacheWarn = ' Die Konfiguration enthielt ccache. Der naechste Build sieht den Wrapper nicht mehr, wenn ~/.bashrc ihn nicht setzt. Dann aendert sich CC_WRAPPER, Soong und Kati erzeugen neu, und der Compile laeuft kalt.'
+      $ccacheWarn = ' Die Konfiguration stammte aus einer frueheren Version und enthielt ccache. Der naechste Build sieht den Wrapper nicht mehr, wenn ~/.bashrc ihn nicht setzt. Dann aendert sich CC_WRAPPER, Soong und Kati erzeugen neu, und der Compile laeuft kalt.'
     }
   }
   foreach ($rel in @(
@@ -211,8 +261,14 @@ strip() {
   file=$1
   name=$2
   [ -f "$file" ] || return 0
-  grep -vxF "$name" "$file" > "$file.tmp" || true
-  mv "$file.tmp" "$file"
+  grep -vxF "$name" "$file" > "$file.tmp"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then
+    rm -f "$file.tmp"
+    return "$rc"
+  fi
+  cp "$file.tmp" "$file"
+  rm -f "$file.tmp"
 }
 if [ -e "$soong/.git" ]; then
   gitdir=$(git -C "$soong" rev-parse --git-dir 2>/dev/null || true)
@@ -234,11 +290,7 @@ if [ -d "$tree/.git" ]; then
 fi
 '@
     $bash = $bash.Replace('__TREE__', (Quote-Bash $loc.Linux))
-    if ($loc.Distro) {
-      & wsl.exe -d $loc.Distro -e bash -lc $bash | Out-Null
-    } else {
-      & wsl.exe -e bash -lc $bash | Out-Null
-    }
+    $null = Invoke-WslCommand $loc.Distro $bash
   }
   return "Gate aus $Tree entfernt. Skripte, Hook und Konfiguration sind weg. Der Diff-Cache und out/ bleiben.$ccacheWarn"
 }
@@ -250,7 +302,7 @@ Das Skript liegt in build/soong/bin/ai-patch-gate.sh. Diese Zeilen von Hand davo
 
 if [[ -f "$TOP/.aaos-ai-gate.conf" || -n "${AAOS_AI_GATE:-}" || -n "${AAOS_AI_GATE_MODE:-}" ]]; then
   export TOP
-  "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \
+  _wrap_build "$TOP/build/soong/bin/ai-patch-gate.sh" run -- \
     "$TOP/build/soong/soong_ui.bash" --build-mode --all-modules --dir="$(pwd)" "$@"
   exit $?
 fi
@@ -285,12 +337,8 @@ function Get-CliProbe([string]$Distro) {
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    if ($Distro) {
-      $out = & wsl.exe -d $Distro -e bash -lc $bash 2>$null
-    } else {
-      $out = & wsl.exe -e bash -lc $bash 2>$null
-    }
-    $code = $LASTEXITCODE
+    $out = Invoke-WslCapture $Distro $bash
+    $code = $script:LastWslExit
   } finally {
     $ErrorActionPreference = $prev
   }
@@ -483,11 +531,7 @@ if ! CCACHE_DIR="$dir" "$exec" -M __SIZE__; then echo M_FAIL; fi
 echo "EXEC:$exec"
 '@
   $cmd = $cmd.Replace('__DIR__', (Quote-Bash $Dir)).Replace('__SIZE__', (Quote-Bash $Size))
-  if ($Loc.Distro) {
-    $out = & wsl.exe -d $Loc.Distro -e bash -lc $cmd
-  } else {
-    $out = & wsl.exe -e bash -lc $cmd
-  }
+  $out = Invoke-WslCapture $Loc.Distro $cmd
   $text = $out -join "`n"
   $dirLine = $out | Where-Object { $_ -like 'DIR:*' } | Select-Object -Last 1
   if ($dirLine) { $result.Dir = $dirLine.Substring(4).Trim() }
@@ -528,7 +572,7 @@ function Install-Gate {
     $url = $script:TxtUrl.Text.Trim()
     $model = $script:TxtModel.Text.Trim()
   }
-  $token = $script:TxtToken.Text
+  $token = $script:TxtToken.Text.Trim()
   if ($token -and ($token.Contains("`n") -or $token.Contains("`r"))) {
     throw 'API-Token enthaelt einen Zeilenumbruch.'
   }
@@ -561,14 +605,20 @@ function Install-Gate {
   if (-not (Test-DistroCommand $loc 'command -v jq >/dev/null')) {
     throw 'jq fehlt in der Distribution oder WSL ist nicht erreichbar. Zum Beispiel: sudo apt install jq. Der Baum wurde nicht veraendert.'
   }
+  if (($url -or ($auth -eq 'token')) -and -not (Test-DistroCommand $loc 'command -v curl >/dev/null')) {
+    throw 'curl fehlt in der Distribution oder WSL ist nicht erreichbar. Zum Beispiel: sudo apt install curl. Der Baum wurde nicht veraendert.'
+  }
   $utf8 = New-Object System.Text.UTF8Encoding $false
 
-  $destSh = Join-Path $tree 'build\soong\bin\ai-patch-gate.sh'
-  [System.IO.File]::Copy($script:Payload, $destSh, $true)
   $dialogPayload = Join-Path $PSScriptRoot 'aaos-ai-gate-dialog.ps1'
-  if (Test-Path -LiteralPath $dialogPayload) {
-    [System.IO.File]::Copy($dialogPayload, (Join-Path $tree 'build\soong\bin\aaos-ai-gate-dialog.ps1'), $true)
+  if (-not (Test-Path -LiteralPath $dialogPayload)) {
+    throw "Dialog fehlt: $dialogPayload"
   }
+  $destSh = Join-Path $tree 'build\soong\bin\ai-patch-gate.sh'
+  $shText = [System.IO.File]::ReadAllText($script:Payload)
+  $shText = $shText -replace "`r", ''
+  [System.IO.File]::WriteAllText($destSh, $shText, $utf8)
+  [System.IO.File]::Copy($dialogPayload, (Join-Path $tree 'build\soong\bin\aaos-ai-gate-dialog.ps1'), $true)
   $notes = New-Object System.Collections.Generic.List[string]
   if (-not $url) {
     $probeKey = ''
@@ -602,6 +652,9 @@ function Install-Gate {
   $patched = Update-BuildEntry $mText
   if ($patched.Status -eq 'fehlt') {
     $notes.Add((Get-ManualHook))
+  } elseif ($patched.Status -eq 'vorhanden, ohne export TOP' -or $patched.Status -eq 'vorhanden, Hook unvollstaendig') {
+    $notes.Add("Hook in m: $($patched.Status).")
+    $notes.Add('Hinweis: der vorhandene Block wurde nicht geaendert. Den Hook in build/soong/bin/m von Hand pruefen.')
   } elseif ($patched.Text -ne $mText) {
     [System.IO.File]::WriteAllText($mPath, $patched.Text, $utf8)
   }
@@ -633,7 +686,7 @@ function Install-Gate {
       $notes.Add('Vorhandene .aaos-ai-gate.conf wurde entfernt.')
     }
     if ($oldCcache) {
-      $notes.Add('Die bisherige Konfiguration enthielt ccache. Diese Zeilen entfallen. Stehen sie nicht in der Shell, aendert der naechste Build CC_WRAPPER und Soong und Kati erzeugen neu.')
+      $notes.Add('Die bisherige Konfiguration stammte aus einer frueheren Version und enthielt ccache. Diese Zeilen entfallen. Stehen sie nicht in der Shell, aendert der naechste Build CC_WRAPPER und Soong und Kati erzeugen neu.')
     }
     $guide = Get-SelfGuide $mode $provider $auth $url $token $model $writeCcache $cexec $cdir $csize $ccacheNote
     $head = "Installiert in $tree. Modus: $mode. Keine Konfigurationsdatei geschrieben."
@@ -652,7 +705,11 @@ function Install-Gate {
   } else {
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     & icacls.exe $confPath /inheritance:r /grant:r "${me}:(R,W)" | Out-Null
-    $notes.Add('Die Konfiguration ist auf den aktuellen Windows-Benutzer beschraenkt. Unix-Modus 600 gilt auf diesem Laufwerk nicht.')
+    if ($LASTEXITCODE -ne 0) {
+      $notes.Add("Warnung: icacls ist fehlgeschlagen (rc=$LASTEXITCODE). Die Konfiguration konnte nicht auf den aktuellen Benutzer beschraenkt werden. Unix-Modus 600 gilt auf diesem Laufwerk nicht.")
+    } else {
+      $notes.Add('Die Konfiguration ist auf den aktuellen Windows-Benutzer beschraenkt. Unix-Modus 600 gilt auf diesem Laufwerk nicht.')
+    }
   }
 
   $label = 'blockierend, Vorabtest'
@@ -667,7 +724,7 @@ function Install-Gate {
     'Diff, Stash und Commit-Betreffs gehen an den Anbieter. Claude mit Token an api.anthropic.com, Antigravity mit Token an Google, sonst an die Kommandozeile oder an die eigene URL.'
   ) -join "`r`n"
   if ($oldCcache) {
-    $notes.Add('Die bisherige Konfiguration enthielt ccache. Diese Zeilen entfallen. Stehen sie nicht in der Shell, aendert der naechste Build den Wrapper und kompiliert kalt.')
+    $notes.Add('Die bisherige Konfiguration stammte aus einer frueheren Version und enthielt ccache. Diese Zeilen entfallen. Stehen sie nicht in der Shell, aendert der naechste Build den Wrapper und kompiliert kalt.')
   }
   if ($notes.Count -gt 0) {
     return $head + "`r`n" + ($notes -join "`r`n")
