@@ -737,7 +737,7 @@ EOF
     note "i: env.conf was not written"
     return 1
   fi
-  mode=$(stat -f %Lp "$conf" 2>/dev/null || stat -c %a "$conf")
+  mode=$(stat -c %a "$conf" 2>/dev/null || stat -f %Lp "$conf")
   if [[ "$mode" != "600" ]]; then
     note "i: env.conf mode is $mode"
     return 1
