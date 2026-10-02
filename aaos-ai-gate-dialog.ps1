@@ -1,4 +1,9 @@
-﻿# Dialog fuer den parallelen Modus. Der Build laeuft weiter.
+﻿# Rueckfrage: wsl.exe [-d distro] -e bash -c, kein -l und kein -i.
+# Befehl: '<script>' ask --conf '<env.conf>' --context --question --history --answer.
+# Jeder Pfad steht einzeln in einfachen Quotes. env.conf liegt im Datenverzeichnis.
+# Nur $LASTEXITCODE entscheidet. stderr und NativeCommandError sind kein Fehler.
+# Antwort und Fehlermeldung stehen als UTF-8 in answer.txt, nicht in der Job-Ausgabe.
+# Dialog fuer den parallelen Modus. Der Build laeuft weiter.
 param(
   [Parameter(Mandatory = $true)][string]$DataDir
 )
