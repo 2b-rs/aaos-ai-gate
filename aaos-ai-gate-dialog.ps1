@@ -7,9 +7,12 @@ $ErrorActionPreference = 'Stop'
 
 if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
   $hostExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  # PowerShell 5.1 quotet ArgumentList nicht. Die Anfuehrungszeichen gehoeren ins Element.
+  $qScript = '"' + ($PSCommandPath -replace '"', '`"') + '"'
+  $qData = '"' + ($DataDir -replace '"', '`"') + '"'
   Start-Process -FilePath $hostExe -ArgumentList @(
     '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-    '-File', $PSCommandPath, '-DataDir', $DataDir
+    '-File', $qScript, '-DataDir', $qData
   ) | Out-Null
   exit 0
 }
