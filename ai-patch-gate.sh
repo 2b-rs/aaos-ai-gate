@@ -156,8 +156,7 @@ provider_cli() {
 }
 
 write_dialog_env() {
-  local dest=$1 name val cli resolved hidden wrote_cli=0
-  hidden="AAOS_AI_GATE_AWAIT""ING"
+  local dest=$1 name val cli resolved wrote_cli=0
   resolved=
   if [[ -z "${AAOS_AI_GATE_URL:-}" ]]; then
     cli=$(provider_cli 2>/dev/null || true)
@@ -178,9 +177,6 @@ write_dialog_env() {
         continue
         ;;
     esac
-    if [[ "$name" == "$hidden" ]]; then
-      continue
-    fi
     if [[ "$name" == "AAOS_AI_GATE_CLI_DIR" && -n "$resolved" ]]; then
       continue
     fi
@@ -1073,6 +1069,9 @@ cmd_ask() {
   if [[ -n "$err" ]]; then
     ask_fail "unbekannte Option: $err"
   fi
+  if [[ -n "$conf" && -f "$conf" ]]; then
+    load_tree_conf "$conf"
+  fi
   if [[ -n "${AAOS_AI_GATE_TOP:-}" ]]; then
     TOP=$AAOS_AI_GATE_TOP
     export TOP
@@ -1081,9 +1080,6 @@ cmd_ask() {
     if [[ -n "$TOP" ]]; then
       export TOP
     fi
-  fi
-  if [[ -n "$conf" && -f "$conf" ]]; then
-    load_tree_conf "$conf"
   fi
   if [[ -n "${AAOS_AI_GATE_CLI_DIR:-}" && -d "${AAOS_AI_GATE_CLI_DIR}" ]]; then
     PATH="${AAOS_AI_GATE_CLI_DIR}:${PATH}"

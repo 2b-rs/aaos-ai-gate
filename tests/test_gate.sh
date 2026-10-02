@@ -4,6 +4,15 @@
 # With no ids, every case runs. Needs bash 3.2, git, curl, jq, python3.
 set -u
 
+# UTF-8-Locale fuer die Tests: macOS kennt "UTF-8", Linux C.UTF-8 oder en_US.UTF-8.
+UTF8_LOCALE=${UTF8_LOCALE:-}
+if [[ -z "$UTF8_LOCALE" ]]; then
+  for cand in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8 UTF-8; do
+    if locale -a 2>/dev/null | grep -qx "$cand"; then UTF8_LOCALE=$cand; break; fi
+  done
+  : "${UTF8_LOCALE:=UTF-8}"
+fi
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 GATE=${GATE:-$ROOT/ai-patch-gate.sh}
 FAKE_BUILD=$ROOT/tests/fake_build.sh
@@ -137,7 +146,7 @@ run_gate_wait() {
       HOME="$SUITE/home" \
       TMPDIR="${GATE_TMPDIR:-$TMPDIR}" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       "$@" \
       bash "$GATE" run -- bash -c "$poll_build" _ "$COUNT_BEFORE" "$SUITE/server/count" "${BUILD_EXTRA:-0}"
   ) > "$log" 2>&1 &
@@ -302,7 +311,7 @@ EOF
       HOME="$SUITE/home" \
       TMPDIR="$bdir" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
@@ -373,7 +382,7 @@ case_c() {
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
@@ -452,7 +461,7 @@ EOF
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_CACHE="$cache" \
@@ -530,7 +539,7 @@ sys.stdout.write("%s %s\n" % (chars, byt))
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE=UTF-8 \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
@@ -587,7 +596,7 @@ case_f() {
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
       AAOS_AI_GATE_TOKEN="tok-f" \
       AAOS_AI_GATE_TOP="$repo" \
@@ -634,7 +643,7 @@ EOF
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
@@ -691,7 +700,7 @@ EOF
       HOME="$SUITE/home" \
       TMPDIR="$TMPDIR" \
       LANG="${LANG:-}" \
-      LC_CTYPE="${LC_CTYPE:-UTF-8}" \
+      LC_CTYPE="$UTF8_LOCALE" \
       AAOS_AI_GATE=on \
       AAOS_AI_GATE_MODE=parallel \
       AAOS_AI_GATE_URL="http://127.0.0.1:${PORT}/" \
@@ -779,7 +788,7 @@ should f && run_case f case_f
 should g && run_case g case_g
 should i && run_case i case_i
 
-printf '%s Tests, %s fehlgeschlagen\n' "$ok" "$bad"
+printf '%s Tests, %s fehlgeschlagen\n' "$((ok + bad))" "$bad"
 if [[ "$bad" -eq 0 && "$ok" -gt 0 ]]; then
   exit 0
 fi
