@@ -15,10 +15,15 @@ if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
   # PowerShell 5.1 quotet ArgumentList nicht. Die Anfuehrungszeichen gehoeren ins Element.
   $qScript = '"' + ($PSCommandPath -replace '"', '`"') + '"'
   $qData = '"' + ($DataDir -replace '"', '`"') + '"'
-  Start-Process -FilePath $hostExe -ArgumentList @(
-    '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-    '-File', $qScript, '-DataDir', $qData
-  ) | Out-Null
+  try {
+    Start-Process -FilePath $hostExe -ArgumentList @(
+      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+      '-File', $qScript, '-DataDir', $qData
+    ) | Out-Null
+  } catch {
+    Remove-Item -LiteralPath $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
   exit 0
 }
 
