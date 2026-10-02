@@ -17,6 +17,22 @@
 # mm, mmm, mma, mmma and make would otherwise see a different CC_WRAPPER.
 set -u
 
+byte_len() {
+  local s=$1 n had=0 saved=
+  if [[ -n "${LC_ALL+x}" ]]; then
+    had=1
+    saved=$LC_ALL
+  fi
+  LC_ALL=C
+  n=${#s}
+  if [[ "$had" -eq 1 ]]; then
+    LC_ALL=$saved
+  else
+    unset LC_ALL
+  fi
+  printf '%s' "$n"
+}
+
 hash_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{print $1}'
@@ -1302,7 +1318,7 @@ COLLECT
       fi
     )
     piece=$(printf '%s\n' "$file_diff")
-    piece_len=${#piece}
+    piece_len=$(byte_len "$piece")
     if [[ $((send_bytes + piece_len)) -gt $max_bytes && $send_bytes -gt 0 ]]; then
       truncated=1
       break
